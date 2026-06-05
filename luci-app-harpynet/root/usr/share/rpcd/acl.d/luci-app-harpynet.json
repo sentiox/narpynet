@@ -1,0 +1,28 @@
+{
+  "luci-app-harpynet": {
+    "description": "Grant UCI and RPC access to LuCI app harpynet",
+    "read": {
+      "file": {
+        "/etc/init.d/harpynet": [
+          "exec"
+        ],
+        "/usr/bin/harpynet": [
+          "exec"
+        ]
+      },
+      "ubus": {
+        "service": [
+          "list"
+        ]
+      },
+      "uci": [
+        "harpynet"
+      ]
+    },
+    "write": {
+      "uci": [
+        "harpynet"
+      ]
+    }
+  }
+}

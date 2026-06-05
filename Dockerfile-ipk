@@ -1,0 +1,11 @@
+FROM sentiox/openwrt-sdk-ipk:24.10.6
+
+ARG HARPYNET_VERSION
+
+COPY ./harpynet /builder/package/feeds/utilities/harpynet
+COPY ./luci-app-harpynet /builder/package/feeds/luci/luci-app-harpynet
+
+RUN export HARPYNET_VERSION="v${HARPYNET_VERSION}" && \
+    make defconfig && \
+    make package/harpynet/compile V=s -j4 && \
+    make package/luci-app-harpynet/compile V=s -j4

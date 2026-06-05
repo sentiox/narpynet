@@ -1,0 +1,4 @@
+.idea
+fe-app-harpynet/node_modules
+fe-app-harpynet/.env
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "admin/services/harpynet": {
+    "title": "HarpyNet",
+    "order": 42,
+    "action": {
+      "type": "view",
+      "path": "harpynet/harpynet"
+    },
+    "depends": {
+			"acl": [ "luci-app-harpynet" ],
+			"uci": { "harpynet": true }
+		}
+  }
+}
