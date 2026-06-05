@@ -1,11 +1,18 @@
-FROM sentiox/openwrt-sdk-ipk:24.10.6
+FROM openwrt/sdk:x86_64-v24.10.6
+
+WORKDIR /builder
+
+RUN ./scripts/feeds update -a && \
+    ./scripts/feeds install luci-base && \
+    mkdir -p /builder/package/feeds/utilities/ && \
+    mkdir -p /builder/package/feeds/luci/
 
 ARG HARPYNET_VERSION
+ENV HARPYNET_VERSION=${HARPYNET_VERSION}
 
 COPY ./harpynet /builder/package/feeds/utilities/harpynet
 COPY ./luci-app-harpynet /builder/package/feeds/luci/luci-app-harpynet
 
-RUN export HARPYNET_VERSION="v${HARPYNET_VERSION}" && \
-    make defconfig && \
+RUN make defconfig && \
     make package/harpynet/compile V=s -j4 && \
     make package/luci-app-harpynet/compile V=s -j4

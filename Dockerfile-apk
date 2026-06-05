@@ -1,4 +1,12 @@
-FROM sentiox/openwrt-sdk-apk:25.12.3
+FROM openwrt/sdk:x86_64-v25.12.3
+
+WORKDIR /builder
+
+RUN ./setup.sh && \
+    ./scripts/feeds update -a && \
+    ./scripts/feeds install luci-base && \
+    mkdir -p /builder/package/feeds/utilities/ && \
+    mkdir -p /builder/package/feeds/luci/
 
 ARG HARPYNET_VERSION
 ENV HARPYNET_VERSION=${HARPYNET_VERSION}
