@@ -10,6 +10,9 @@ import { renderSections, renderWidget } from './partials';
 import { fetchServicesInfo } from '../../fetchers';
 import { getClashApiSecret } from '../../methods/custom/getClashApiSecret';
 
+const SECTIONS_REFRESH_INTERVAL_MS = 10000;
+let sectionsRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
 // Fetchers
 
 async function fetchDashboardSections() {
@@ -30,10 +33,10 @@ async function fetchDashboardSections() {
 
   store.set({
     sectionsWidget: {
-      latencyFetching: false,
+      ...store.get().sectionsWidget,
       loading: false,
       failed: !success,
-      data,
+      data: success ? data : store.get().sectionsWidget.data,
     },
   });
 }
@@ -121,47 +124,128 @@ async function connectToClashSockets() {
 
 // Handlers
 
-async function handleChooseOutbound(selector: string, tag: string) {
-  await HarpyNetShellMethods.setClashApiGroupProxy(selector, tag);
-  await fetchDashboardSections();
+async function handleChooseOutbound(
+  sectionName: string,
+  selector: string,
+  tag: string,
+) {
+  const current = store.get().sectionsWidget;
+  store.set({
+    sectionsWidget: {
+      ...current,
+      selectorSwitchingSections: {
+        ...current.selectorSwitchingSections,
+        [sectionName]: tag,
+      },
+    },
+  });
+
+  try {
+    await HarpyNetShellMethods.setClashApiGroupProxy(selector, tag);
+    await fetchDashboardSections();
+  } finally {
+    const next = store.get().sectionsWidget;
+    const switching = { ...next.selectorSwitchingSections };
+    delete switching[sectionName];
+    store.set({
+      sectionsWidget: { ...next, selectorSwitchingSections: switching },
+    });
+  }
 }
 
-async function handleTestGroupLatency(tag: string) {
+async function handleTestGroupLatency(sectionName: string, tag: string) {
+  const current = store.get().sectionsWidget;
   store.set({
     sectionsWidget: {
-      ...store.get().sectionsWidget,
-      latencyFetching: true,
+      ...current,
+      latencyFetchingSections: {
+        ...current.latencyFetchingSections,
+        [sectionName]: true,
+      },
     },
   });
 
-  await HarpyNetShellMethods.getClashApiGroupLatency(tag);
-  await fetchDashboardSections();
-
-  store.set({
-    sectionsWidget: {
-      ...store.get().sectionsWidget,
-      latencyFetching: false,
-    },
-  });
+  try {
+    await HarpyNetShellMethods.getClashApiGroupLatency(tag);
+    await fetchDashboardSections();
+  } finally {
+    const next = store.get().sectionsWidget;
+    const fetching = { ...next.latencyFetchingSections };
+    delete fetching[sectionName];
+    store.set({
+      sectionsWidget: { ...next, latencyFetchingSections: fetching },
+    });
+  }
 }
 
-async function handleTestProxyLatency(tag: string) {
+async function handleTestProxyLatency(sectionName: string, tag: string) {
+  const current = store.get().sectionsWidget;
   store.set({
     sectionsWidget: {
-      ...store.get().sectionsWidget,
-      latencyFetching: true,
+      ...current,
+      latencyFetchingSections: {
+        ...current.latencyFetchingSections,
+        [sectionName]: true,
+      },
     },
   });
 
-  await HarpyNetShellMethods.getClashApiProxyLatency(tag);
-  await fetchDashboardSections();
+  try {
+    await HarpyNetShellMethods.getClashApiProxyLatency(tag);
+    await fetchDashboardSections();
+  } finally {
+    const next = store.get().sectionsWidget;
+    const fetching = { ...next.latencyFetchingSections };
+    delete fetching[sectionName];
+    store.set({
+      sectionsWidget: { ...next, latencyFetchingSections: fetching },
+    });
+  }
+}
 
+async function handleUpdateSubscription(sectionName: string) {
+  const current = store.get().sectionsWidget;
   store.set({
     sectionsWidget: {
-      ...store.get().sectionsWidget,
-      latencyFetching: false,
+      ...current,
+      subscriptionUpdatingSections: {
+        ...current.subscriptionUpdatingSections,
+        [sectionName]: true,
+      },
     },
   });
+
+  try {
+    const response = await HarpyNetShellMethods.updateSubscription();
+
+    if (!response.success || !response.data?.success) {
+      throw new Error('Subscription update failed');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await fetchDashboardSections();
+    ui.addNotification(
+      'HarpyNet',
+      E('p', {}, 'Подписка успешно обновлена'),
+      'info',
+    );
+  } catch (_error) {
+    ui.addNotification(
+      'Ошибка HarpyNet',
+      E('p', {}, 'Не удалось обновить подписку. Проверьте подключение и логи.'),
+      'error',
+    );
+  } finally {
+    const next = store.get().sectionsWidget;
+    const updating = { ...next.subscriptionUpdatingSections };
+    delete updating[sectionName];
+    store.set({
+      sectionsWidget: {
+        ...next,
+        subscriptionUpdatingSections: updating,
+      },
+    });
+  }
 }
 
 // Renderer
@@ -177,13 +261,17 @@ async function renderSectionsWidget() {
       failed: sectionsWidget.failed,
       section: {
         code: '',
+        sectionName: '',
         displayName: '',
         outbounds: [],
         withTagSelect: false,
       },
       onTestLatency: () => {},
       onChooseOutbound: () => {},
-      latencyFetching: sectionsWidget.latencyFetching,
+      onUpdateSubscription: async () => {},
+      latencyFetching: false,
+      subscriptionUpdating: false,
+      selectorSwitchingTag: undefined,
     });
 
     return preserveScrollForPage(() => {
@@ -196,16 +284,26 @@ async function renderSectionsWidget() {
       loading: sectionsWidget.loading,
       failed: sectionsWidget.failed,
       section,
-      latencyFetching: sectionsWidget.latencyFetching,
+      latencyFetching: Boolean(
+        sectionsWidget.latencyFetchingSections[section.sectionName],
+      ),
+      subscriptionUpdating: Boolean(
+        sectionsWidget.subscriptionUpdatingSections[section.sectionName],
+      ),
+      selectorSwitchingTag:
+        sectionsWidget.selectorSwitchingSections[section.sectionName],
       onTestLatency: (tag) => {
         if (section.withTagSelect) {
-          return handleTestGroupLatency(tag);
+          return handleTestGroupLatency(section.sectionName, tag);
         }
 
-        return handleTestProxyLatency(tag);
+        return handleTestProxyLatency(section.sectionName, tag);
       },
-      onChooseOutbound: (selector, tag) => {
-        handleChooseOutbound(selector, tag);
+      onChooseOutbound: (sectionName, selector, tag) => {
+        void handleChooseOutbound(sectionName, selector, tag);
+      },
+      onUpdateSubscription: (targetSection) => {
+        return handleUpdateSubscription(targetSection.sectionName);
       },
     }),
   );
@@ -237,12 +335,28 @@ async function renderBandwidthWidget() {
     failed: traffic.failed,
     title: _('Traffic'),
     items: [
-      { key: _('Uplink'), value: `${prettyBytes(traffic.data.up)}/s` },
-      { key: _('Downlink'), value: `${prettyBytes(traffic.data.down)}/s` },
+      { key: _('Uplink'), value: formatBitrate(traffic.data.up) },
+      { key: _('Downlink'), value: formatBitrate(traffic.data.down) },
     ],
   });
 
   container!.replaceChildren(renderedWidget);
+}
+
+function formatBitrate(bytesPerSecond: number) {
+  const bitsPerSecond = Math.max(0, Number(bytesPerSecond) || 0) * 8;
+  const units = [
+    { threshold: 1e9, divisor: 1e9, suffix: 'Гбит/с' },
+    { threshold: 1e6, divisor: 1e6, suffix: 'Мбит/с' },
+    { threshold: 1e3, divisor: 1e3, suffix: 'Кбит/с' },
+  ];
+  const unit = units.find(({ threshold }) => bitsPerSecond >= threshold);
+
+  if (!unit) {
+    return `${Math.round(bitsPerSecond)} бит/с`;
+  }
+
+  return `${Number((bitsPerSecond / unit.divisor).toPrecision(3))} ${unit.suffix}`;
 }
 
 async function renderTrafficTotalWidget() {
@@ -404,9 +518,16 @@ async function onPageMount() {
   await fetchDashboardSections();
   await fetchServicesInfo();
   await connectToClashSockets();
+  sectionsRefreshTimer = setInterval(() => {
+    void fetchDashboardSections();
+  }, SECTIONS_REFRESH_INTERVAL_MS);
 }
 
 function onPageUnmount() {
+  if (sectionsRefreshTimer) {
+    clearInterval(sectionsRefreshTimer);
+    sectionsRefreshTimer = null;
+  }
   // Remove old listener
   store.unsubscribe(onStoreUpdate);
   // Clear store

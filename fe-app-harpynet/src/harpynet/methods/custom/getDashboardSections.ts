@@ -1,11 +1,94 @@
 import { getConfigSections } from './getConfigSections';
 import { HarpyNet } from '../../types';
-import { getProxyUrlName, splitProxyString } from '../../../helpers';
+import { getProxyUrlName } from '../../../helpers';
 import { HarpyNetShellMethods } from '../shell';
 
 interface IGetDashboardSectionsResponse {
   success: boolean;
   data: HarpyNet.OutboundGroup[];
+}
+
+async function readSubscriptionLinkCache(sectionName: string) {
+  if (!/^[A-Za-z0-9_-]+$/.test(sectionName)) {
+    return new Map<string, string>();
+  }
+
+  const cache = await HarpyNetShellMethods.getSubscriptionCache(sectionName);
+
+  if (cache.success && cache.data && typeof cache.data === 'object') {
+    return new Map(
+      Object.entries(cache.data).filter(
+        ([code, link]) => Boolean(code && link) && typeof link === 'string',
+      ) as Array<[string, string]>,
+    );
+  }
+
+  return new Map<string, string>();
+}
+
+async function readSubscriptionMetadata(sectionName: string) {
+  const response =
+    await HarpyNetShellMethods.getSubscriptionMetadata(sectionName);
+
+  if (
+    response.success &&
+    response.data &&
+    typeof response.data === 'object' &&
+    Object.keys(response.data).length > 1
+  ) {
+    return [response.data];
+  }
+
+  return undefined;
+}
+
+function getCachedProxyName(link: string) {
+  const hashIndex = link.indexOf('#');
+
+  if (hashIndex === -1) {
+    return '';
+  }
+
+  const name = link.slice(hashIndex + 1);
+
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+function inferCountryCode(displayName: string) {
+  const value = displayName.toLowerCase();
+  const aliases: Array<[string, string]> = [
+    ['япони', 'JP'],
+    ['japan', 'JP'],
+    ['эстони', 'EE'],
+    ['estonia', 'EE'],
+    ['швец', 'SE'],
+    ['sweden', 'SE'],
+    ['сингапур', 'SG'],
+    ['singapore', 'SG'],
+    ['британи', 'GB'],
+    ['united kingdom', 'GB'],
+    ['germany', 'DE'],
+    ['германи', 'DE'],
+    ['нидерланд', 'NL'],
+    ['netherlands', 'NL'],
+    ['финлян', 'FI'],
+    ['finland', 'FI'],
+    ['франц', 'FR'],
+    ['france', 'FR'],
+    ['сша', 'US'],
+    ['united states', 'US'],
+    ['usa', 'US'],
+    ['канад', 'CA'],
+    ['canada', 'CA'],
+    ['польш', 'PL'],
+    ['poland', 'PL'],
+  ];
+
+  return aliases.find(([alias]) => value.includes(alias))?.[1];
 }
 
 export async function getDashboardSections(): Promise<IGetDashboardSectionsResponse> {
@@ -29,97 +112,16 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
   const data = configSections
     .filter(
       (section) =>
-        section.connection_type !== 'block' &&
         section.connection_type !== 'exclusion' &&
         section['.type'] !== 'settings',
     )
-    .map((section) => {
+    .map(async (section) => {
       if (section.connection_type === 'proxy') {
-        if (section.proxy_config_type === 'url') {
-          const outbound = proxies.find(
-            (proxy) => proxy.code === `${section['.name']}-out`,
+        {
+          const linkByCode = await readSubscriptionLinkCache(section['.name']);
+          const subscriptionMetadata = await readSubscriptionMetadata(
+            section['.name'],
           );
-
-          const activeConfigs = splitProxyString(section.proxy_string);
-
-          const proxyDisplayName =
-            getProxyUrlName(activeConfigs?.[0]) || outbound?.value?.name || '';
-
-          return {
-            withTagSelect: false,
-            code: outbound?.code || section['.name'],
-            displayName: section['.name'],
-            outbounds: [
-              {
-                code: outbound?.code || section['.name'],
-                displayName: proxyDisplayName,
-                latency: outbound?.value?.history?.[0]?.delay || 0,
-                type: outbound?.value?.type || '',
-                selected: true,
-              },
-            ],
-          };
-        }
-
-        if (section.proxy_config_type === 'outbound') {
-          const outbound = proxies.find(
-            (proxy) => proxy.code === `${section['.name']}-out`,
-          );
-
-          const parsedOutbound = JSON.parse(section.outbound_json);
-          const parsedTag = parsedOutbound?.tag
-            ? decodeURIComponent(parsedOutbound?.tag)
-            : undefined;
-          const proxyDisplayName = parsedTag || outbound?.value?.name || '';
-
-          return {
-            withTagSelect: false,
-            code: outbound?.code || section['.name'],
-            displayName: section['.name'],
-            outbounds: [
-              {
-                code: outbound?.code || section['.name'],
-                displayName: proxyDisplayName,
-                latency: outbound?.value?.history?.[0]?.delay || 0,
-                type: outbound?.value?.type || '',
-                selected: true,
-              },
-            ],
-          };
-        }
-
-        if (section.proxy_config_type === 'selector') {
-          const selector = proxies.find(
-            (proxy) => proxy.code === `${section['.name']}-out`,
-          );
-
-          const links = section.selector_proxy_links ?? [];
-
-          const outbounds = links
-            .map((link, index) => ({
-              link,
-              outbound: proxies.find(
-                (item) => item.code === `${section['.name']}-${index + 1}-out`,
-              ),
-            }))
-            .map((item) => ({
-              code: item?.outbound?.code || '',
-              displayName:
-                getProxyUrlName(item.link) || item?.outbound?.value?.name || '',
-              latency: item?.outbound?.value?.history?.[0]?.delay || 0,
-              type: item?.outbound?.value?.type || '',
-              selected: selector?.value?.now === item?.outbound?.code,
-            }));
-
-          return {
-            withTagSelect: true,
-            code: selector?.code || section['.name'],
-            displayName: section['.name'],
-            outbounds,
-          };
-        }
-
-        if (section.proxy_config_type === 'subscription') {
           const selector = proxies.find(
             (proxy) => proxy.code === `${section['.name']}-out`,
           );
@@ -130,18 +132,35 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
           const outbounds = (selector?.value?.all ?? [])
             .map((code) => proxies.find((item) => item.code === code))
             .filter((item) => item?.code !== urltest?.code)
-            .map((item) => ({
-              code: item?.code || '',
-              displayName: item?.value?.name || item?.code || '',
-              latency: item?.value?.history?.[0]?.delay || 0,
-              type: item?.value?.type || '',
-              selected: selector?.value?.now === item?.code,
-            }));
+            .map((item) => {
+              const link = linkByCode.get(item?.code || '') || '';
+              const displayName =
+                getCachedProxyName(link) ||
+                getProxyUrlName(link) ||
+                item?.value?.name ||
+                item?.code ||
+                '';
+
+              return {
+                code: item?.code || '',
+                displayName,
+                latency: item?.value?.history?.[0]?.delay || 0,
+                type: item?.value?.type || '',
+                selected: selector?.value?.now === item?.code,
+                link,
+                canCopyLink: Boolean(link),
+                country: inferCountryCode(displayName),
+              };
+            });
 
           return {
             withTagSelect: true,
             code: selector?.code || section['.name'],
+            sectionName: section['.name'],
             displayName: section['.name'],
+            latencyTestCode: urltest?.code || selector?.code,
+            subscriptionSourceCount: 1,
+            subscriptionMetadata,
             outbounds: [
               ...(urltest
                 ? [
@@ -159,69 +178,12 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
           };
         }
 
-        if (section.proxy_config_type === 'urltest') {
-          const selector = proxies.find(
-            (proxy) => proxy.code === `${section['.name']}-out`,
-          );
-          const outbound = proxies.find(
-            (proxy) => proxy.code === `${section['.name']}-urltest-out`,
-          );
-
-          const outbounds = (outbound?.value?.all ?? [])
-            .map((code) => proxies.find((item) => item.code === code))
-            .map((item, index) => ({
-              code: item?.code || '',
-              displayName:
-                getProxyUrlName(section.urltest_proxy_links?.[index]) ||
-                item?.value?.name ||
-                '',
-              latency: item?.value?.history?.[0]?.delay || 0,
-              type: item?.value?.type || '',
-              selected: selector?.value?.now === item?.code,
-            }));
-
-          return {
-            withTagSelect: true,
-            code: selector?.code || section['.name'],
-            displayName: section['.name'],
-            outbounds: [
-              {
-                code: outbound?.code || '',
-                displayName: _('Fastest'),
-                latency: outbound?.value?.history?.[0]?.delay || 0,
-                type: outbound?.value?.type || '',
-                selected: selector?.value?.now === outbound?.code,
-              },
-              ...outbounds,
-            ],
-          };
-        }
-      }
-
-      if (section.connection_type === 'vpn') {
-        const outbound = proxies.find(
-          (proxy) => proxy.code === `${section['.name']}-out`,
-        );
-
-        return {
-          withTagSelect: false,
-          code: outbound?.code || section['.name'],
-          displayName: section['.name'],
-          outbounds: [
-            {
-              code: outbound?.code || section['.name'],
-              displayName: section.interface || outbound?.value?.name || '',
-              latency: outbound?.value?.history?.[0]?.delay || 0,
-              type: outbound?.value?.type || '',
-              selected: true,
-            },
-          ],
-        };
       }
 
       return {
         withTagSelect: false,
         code: section['.name'],
+        sectionName: section['.name'],
         displayName: section['.name'],
         outbounds: [],
       };
@@ -229,6 +191,6 @@ export async function getDashboardSections(): Promise<IGetDashboardSectionsRespo
 
   return {
     success: true,
-    data,
+    data: await Promise.all(data),
   };
 }

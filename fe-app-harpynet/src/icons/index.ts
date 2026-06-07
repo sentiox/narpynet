@@ -16,3 +16,6 @@ export * from './renderSquareChartGanttIcon24';
 export * from './renderCogIcon24';
 export * from './renderSearchIcon24';
 export * from './renderBookOpenTextIcon24';
+export * from './renderCopyIcon24';
+export * from './renderLinkIcon24';
+export * from './renderHeadphonesIcon24';

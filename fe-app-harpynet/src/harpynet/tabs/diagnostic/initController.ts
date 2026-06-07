@@ -252,9 +252,25 @@ async function handleViewLogs() {
     const viewLogs = await HarpyNetShellMethods.checkLogs();
 
     if (viewLogs.success) {
+      const getLatestLogs = async () => {
+        const latestLogs = await HarpyNetShellMethods.checkLogs();
+
+        if (!latestLogs.success) {
+          throw latestLogs;
+        }
+
+        return (latestLogs.data as string) ?? '';
+      };
+
       ui.showModal(
         _('View logs'),
-        renderModal(viewLogs.data as string, 'view_logs'),
+        renderModal(viewLogs.data as string, 'view_logs', {
+          getText: getLatestLogs,
+          refreshMs: 250,
+          initialAutoRefresh: true,
+          showAutoRefreshToggle: true,
+          startAtEnd: true,
+        }),
       );
     } else {
       logger.error('[DIAGNOSTIC]', 'handleViewLogs - e', viewLogs);

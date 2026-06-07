@@ -16,6 +16,15 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
+msgid "Subscription"
+msgstr ""
+
+msgid "HarpyNet uses a subscription link to load and update proxy servers."
+msgstr ""
+
+msgid "HarpyNet subscription link. Server list, device authorization and subscription information are updated automatically."
+msgstr ""
+
 #: src/harpynet/tabs/dashboard/initController.ts:345
 msgid "✔ Enabled"
 msgstr ""
@@ -139,6 +148,27 @@ msgstr ""
 msgid "Connection Type"
 msgstr ""
 
+msgid "Every hour"
+msgstr ""
+
+msgid "Every 3 hours"
+msgstr ""
+
+msgid "Every 12 hours"
+msgstr ""
+
+msgid "Every day"
+msgstr ""
+
+msgid "Every 3 days"
+msgstr ""
+
+msgid "Choose whether matching traffic uses HarpyNet or bypasses it"
+msgstr ""
+
+msgid "Exclusion"
+msgstr ""
+
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/section.js:26
 msgid "Connection URL"
 msgstr ""
@@ -246,7 +276,7 @@ msgid "Download"
 msgstr ""
 
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/settings.js:288
-msgid "Download Lists via Proxy/VPN"
+msgid "Download Lists via Proxy"
 msgstr ""
 
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/settings.js:297
@@ -255,7 +285,7 @@ msgstr ""
 
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/settings.js:289
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/settings.js:298
-msgid "Downloading all lists via specific Proxy/VPN"
+msgid "Downloading all lists via a specific Proxy section"
 msgstr ""
 
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/section.js:391
@@ -332,7 +362,7 @@ msgid "Exclude NTP"
 msgstr ""
 
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/settings.js:403
-msgid "Exclude NTP protocol traffic from the tunnel to prevent it from being routed through the proxy or VPN"
+msgid "Exclude NTP protocol traffic from HarpyNet proxy routing"
 msgstr ""
 
 #: src/helpers/copyToClipboard.ts:12
@@ -1112,4 +1142,79 @@ msgstr ""
 
 #: ../luci-app-harpynet/htdocs/luci-static/resources/view/harpynet/settings.js:127
 msgid "You can select Output Network Interface, by default autodetect"
+msgstr ""
+
+msgid "Logs"
+msgstr ""
+
+msgid "Search"
+msgstr ""
+
+msgid "Active"
+msgstr ""
+
+msgid "Closed"
+msgstr ""
+
+msgid "Host"
+msgstr ""
+
+msgid "Type"
+msgstr ""
+
+msgid "Route"
+msgstr ""
+
+msgid "Time"
+msgstr ""
+
+msgid "Downloaded"
+msgstr ""
+
+msgid "Uploaded"
+msgstr ""
+
+msgid "Source"
+msgstr ""
+
+msgid "Close connection"
+msgstr ""
+
+msgid "Close all connections"
+msgstr ""
+
+msgid "Pause updates"
+msgstr ""
+
+msgid "Resume updates"
+msgstr ""
+
+msgid "Loading connections"
+msgstr ""
+
+msgid "No active connections"
+msgstr ""
+
+msgid "No closed connections"
+msgstr ""
+
+msgid "Failed to load connections"
+msgstr ""
+
+msgid "Failed to close connections"
+msgstr ""
+
+msgid "Unknown"
+msgstr ""
+
+msgid "Proxy"
+msgstr ""
+
+msgid "Without VPN"
+msgstr ""
+
+msgid "No proxy connections"
+msgstr ""
+
+msgid "No direct connections"
 msgstr ""

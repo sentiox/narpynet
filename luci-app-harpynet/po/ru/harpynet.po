@@ -17,6 +17,15 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
 
+msgid "Subscription"
+msgstr "Подписка"
+
+msgid "HarpyNet uses a subscription link to load and update proxy servers."
+msgstr "HarpyNet использует ссылку подписки для загрузки и обновления серверов."
+
+msgid "HarpyNet subscription link. Server list, device authorization and subscription information are updated automatically."
+msgstr "Ссылка подписки HarpyNet. Список серверов, авторизация устройства и информация о подписке обновляются автоматически."
+
 msgid "✔ Enabled"
 msgstr "✔ Включено"
 
@@ -104,6 +113,37 @@ msgstr "Тип конфигурации"
 msgid "Connection Type"
 msgstr "Тип подключения"
 
+msgid "Every hour"
+msgstr "Каждый час"
+
+msgid "Every 3 hours"
+msgstr "Каждые 3 часа"
+
+msgid "Every 12 hours"
+msgstr "Каждые 12 часов"
+
+msgid "Every day"
+msgstr "Каждый день"
+
+msgid "Every 3 days"
+msgstr "Каждые 3 дня"
+
+msgid "Subscription Update Frequency"
+msgstr "Частота обновления подписки"
+
+msgid ""
+"Select how often HarpyNet downloads the subscription again to refresh "
+"access keys, servers and subscription information"
+msgstr ""
+"Выберите, как часто HarpyNet будет заново загружать подписку для обновления "
+"ключей доступа, серверов и информации о подписке"
+
+msgid "Choose whether matching traffic uses HarpyNet or bypasses it"
+msgstr "Выберите: направлять трафик через HarpyNet или пропускать его напрямую"
+
+msgid "Exclusion"
+msgstr "Исключение"
+
 msgid "Connection URL"
 msgstr "URL подключения"
 
@@ -171,7 +211,7 @@ msgid "Domain Resolver"
 msgstr "Резолвер доменов"
 
 msgid "Dont Touch My DHCP!"
-msgstr "Dont Touch My DHCP!"
+msgstr "Не изменять DHCP"
 
 msgid "Downlink"
 msgstr "Входящий"
@@ -179,14 +219,14 @@ msgstr "Входящий"
 msgid "Download"
 msgstr "Скачать"
 
-msgid "Download Lists via Proxy/VPN"
-msgstr "Скачивать списки через Proxy/VPN"
+msgid "Download Lists via Proxy"
+msgstr "Скачивать списки через прокси"
 
 msgid "Download Lists via specific proxy section"
 msgstr "Скачивать списки через выбранную секцию"
 
-msgid "Downloading all lists via specific Proxy/VPN"
-msgstr "Загрузка всех списков через указанный прокси/VPN"
+msgid "Downloading all lists via a specific Proxy section"
+msgstr "Загружать списки доменов и подсетей через выбранную секцию Proxy"
 
 msgid "Dynamic List"
 msgstr "Динамический список"
@@ -242,8 +282,8 @@ msgstr "Каждые 5 минут"
 msgid "Exclude NTP"
 msgstr "Исключить NTP"
 
-msgid "Exclude NTP protocol traffic from the tunnel to prevent it from being routed through the proxy or VPN"
-msgstr "Исключите трафик протокола NTP из туннеля, чтобы предотвратить его маршрутизацию через прокси-сервер или VPN."
+msgid "Exclude NTP protocol traffic from HarpyNet proxy routing"
+msgstr "Синхронизация времени будет идти напрямую, минуя HarpyNet"
 
 msgid "Failed to copy!"
 msgstr "Не удалось скопировать!"
@@ -489,7 +529,7 @@ msgid "HarpyNet"
 msgstr "HarpyNet"
 
 msgid "HarpyNet Settings"
-msgstr "Настройки harpynet"
+msgstr "HarpyNet"
 
 msgid "HarpyNet will not modify your DHCP configuration"
 msgstr "HarpyNet не будет изменять вашу конфигурацию DHCP."
@@ -793,3 +833,78 @@ msgstr "Секретный ключ YACD"
 
 msgid "You can select Output Network Interface, by default autodetect"
 msgstr "Вы можете выбрать выходной сетевой интерфейс, по умолчанию он определяется автоматически."
+
+msgid "Logs"
+msgstr "Логи"
+
+msgid "Search"
+msgstr "Поиск"
+
+msgid "Active"
+msgstr "Активные"
+
+msgid "Closed"
+msgstr "Закрытые"
+
+msgid "Host"
+msgstr "Хост"
+
+msgid "Type"
+msgstr "Тип"
+
+msgid "Route"
+msgstr "Маршрут"
+
+msgid "Time"
+msgstr "Время"
+
+msgid "Downloaded"
+msgstr "Загружено"
+
+msgid "Uploaded"
+msgstr "Отдано"
+
+msgid "Source"
+msgstr "Источник"
+
+msgid "Close connection"
+msgstr "Закрыть соединение"
+
+msgid "Close all connections"
+msgstr "Закрыть все соединения"
+
+msgid "Pause updates"
+msgstr "Пауза обновлений"
+
+msgid "Resume updates"
+msgstr "Продолжить обновления"
+
+msgid "Loading connections"
+msgstr "Загрузка соединений"
+
+msgid "No active connections"
+msgstr "Нет активных соединений"
+
+msgid "No closed connections"
+msgstr "Нет закрытых соединений"
+
+msgid "Failed to load connections"
+msgstr "Не удалось загрузить соединения"
+
+msgid "Failed to close connections"
+msgstr "Не удалось закрыть соединения"
+
+msgid "Unknown"
+msgstr "Неизвестно"
+
+msgid "Proxy"
+msgstr "Прокси"
+
+msgid "Without VPN"
+msgstr "Без VPN"
+
+msgid "No proxy connections"
+msgstr "Нет прокси-соединений"
+
+msgid "No direct connections"
+msgstr "Нет соединений без VPN"

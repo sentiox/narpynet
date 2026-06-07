@@ -28,6 +28,16 @@ export const HarpyNetShellMethods = {
     callBaseMethod<ClashAPI.Proxies>(HarpyNet.AvailableMethods.CLASH_API, [
       HarpyNet.AvailableClashAPIMethods.GET_PROXIES,
     ]),
+  getClashApiConnections: async () =>
+    callBaseMethod<unknown>(HarpyNet.AvailableMethods.CLASH_API, [
+      HarpyNet.AvailableClashAPIMethods.GET_CONNECTIONS,
+    ]),
+  getDirectConnections: async () =>
+    callBaseMethod<unknown>(HarpyNet.AvailableMethods.GET_DIRECT_CONNECTIONS),
+  getDhcpClients: async () =>
+    callBaseMethod<{ clients?: Record<string, string> }>(
+      HarpyNet.AvailableMethods.GET_DHCP_CLIENTS,
+    ),
   getClashApiProxyLatency: async (tag: string) =>
     callBaseMethod<HarpyNet.GetClashApiProxyLatency>(
       HarpyNet.AvailableMethods.CLASH_API,
@@ -44,6 +54,22 @@ export const HarpyNetShellMethods = {
       group,
       proxy,
     ]),
+  closeClashApiConnection: async (id: string) =>
+    callBaseMethod<unknown>(HarpyNet.AvailableMethods.CLASH_API, [
+      HarpyNet.AvailableClashAPIMethods.CLOSE_CONNECTION,
+      id,
+    ]),
+  closeAllClashApiConnections: async () =>
+    callBaseMethod<unknown>(HarpyNet.AvailableMethods.CLASH_API, [
+      HarpyNet.AvailableClashAPIMethods.CLOSE_ALL_CONNECTIONS,
+    ]),
+  updateSubscription: async () =>
+    callBaseMethod<{ success: boolean }>(
+      HarpyNet.AvailableMethods.SUBSCRIPTION_UPDATE,
+      [],
+      '/usr/bin/harpynet',
+      60000,
+    ),
   restart: async () =>
     callBaseMethod<unknown>(
       HarpyNet.AvailableMethods.RESTART,
@@ -80,6 +106,16 @@ export const HarpyNetShellMethods = {
     callBaseMethod<unknown>(HarpyNet.AvailableMethods.SHOW_SING_BOX_CONFIG),
   checkLogs: async () =>
     callBaseMethod<unknown>(HarpyNet.AvailableMethods.CHECK_LOGS),
+  getSubscriptionCache: async (section: string) =>
+    callBaseMethod<Record<string, string>>(
+      HarpyNet.AvailableMethods.GET_SUBSCRIPTION_CACHE,
+      [section],
+    ),
+  getSubscriptionMetadata: async (section: string) =>
+    callBaseMethod<HarpyNet.SubscriptionMetadata>(
+      HarpyNet.AvailableMethods.GET_SUBSCRIPTION_METADATA,
+      [section],
+    ),
   getSystemInfo: async () =>
     callBaseMethod<HarpyNet.GetSystemInfo>(
       HarpyNet.AvailableMethods.GET_SYSTEM_INFO,

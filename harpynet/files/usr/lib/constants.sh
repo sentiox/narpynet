@@ -9,6 +9,7 @@ CHECK_PROXY_IP_DOMAIN="ip.harpynet.fyi"
 FAKEIP_TEST_DOMAIN="fakeip.harpynet.fyi"
 TMP_SING_BOX_FOLDER="/tmp/sing-box"
 TMP_RULESET_FOLDER="$TMP_SING_BOX_FOLDER/rulesets"
+DNS_LOG_FILE="/tmp/harpynet-dns.log"
 CLOUDFLARE_OCTETS="8.47 162.159 188.114" # Endpoints https://github.com/ampetelin/warp-endpoint-checker
 JQ_REQUIRED_VERSION="1.7.1"
 COREUTILS_BASE64_REQUIRED_VERSION="9.7"
@@ -63,4 +64,15 @@ SUBNETS_HETZNER="${GITHUB_RAW_URL}/Subnets/IPv4/hetzner.lst"
 SUBNETS_OVH="${GITHUB_RAW_URL}/Subnets/IPv4/ovh.lst"
 SUBNETS_DIGITALOCEAN="${GITHUB_RAW_URL}/Subnets/IPv4/digitalocean.lst"
 SUBNETS_CLOUDFRONT="${GITHUB_RAW_URL}/Subnets/IPv4/cloudfront.lst"
+DISCORD_VOICE_IPV4_CIDRS='[
+    "5.200.14.128/25",
+    "34.0.0.0/14",
+    "35.192.0.0/11",
+    "66.22.192.0/18",
+    "104.16.0.0/12",
+    "138.128.136.0/21",
+    "162.158.0.0/15",
+    "172.64.0.0/12",
+    "192.34.96.0/22"
+]'
 COMMUNITY_SERVICES="russia_inside russia_outside ukraine_inside geoblock block porn news anime youtube hdrezka tiktok google_ai google_play hodca discord meta twitter cloudflare cloudfront digitalocean hetzner ovh telegram roblox"

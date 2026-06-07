@@ -1,8 +1,21 @@
 // language=CSS
 export const styles = `
 
-#cbi-harpynet-diagnostic-_mount_node > div {
+#cbi-harpynet-diagnostic-_mount_node {
+    display: block;
     width: 100%;
+    margin: 0;
+}
+
+#cbi-harpynet-diagnostic-_mount_node > .cbi-value-title {
+    display: none;
+}
+
+#cbi-harpynet-diagnostic-_mount_node > .cbi-value-field {
+    float: none;
+    width: 100% !important;
+    max-width: none;
+    margin: 0;
 }
 
 #cbi-harpynet-diagnostic > h3 {
@@ -11,6 +24,8 @@ export const styles = `
 
 .pdk_diagnostic-page {
     display: grid;
+    width: 100%;
+    box-sizing: border-box;
     grid-template-columns: 2fr 1fr;
     grid-column-gap: 10px;
     align-items: start;

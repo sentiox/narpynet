@@ -30,6 +30,7 @@ export default defineConfig({
         );
 
         fs.writeFileSync(file, code, 'utf8');
+        fs.copyFileSync(file, path.join(outDir, 'main-v004.js'));
         console.log(`✅ Patched LuCI build: ${file}`);
     },
 });

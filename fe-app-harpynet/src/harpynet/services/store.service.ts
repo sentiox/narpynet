@@ -165,7 +165,9 @@ export interface StoreType {
     loading: boolean;
     failed: boolean;
     data: HarpyNet.OutboundGroup[];
-    latencyFetching: boolean;
+    latencyFetchingSections: Record<string, boolean>;
+    selectorSwitchingSections: Record<string, string>;
+    subscriptionUpdatingSections: Record<string, boolean>;
   };
   diagnosticsRunAction: {
     loading: boolean;
@@ -220,7 +222,9 @@ const initialStore: StoreType = {
   sectionsWidget: {
     loading: true,
     failed: false,
-    latencyFetching: false,
+    latencyFetchingSections: {},
+    selectorSwitchingSections: {},
+    subscriptionUpdatingSections: {},
     data: [],
   },
   ...initialDiagnosticStore,

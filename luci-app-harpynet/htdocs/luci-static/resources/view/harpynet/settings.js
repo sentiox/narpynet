@@ -3,7 +3,7 @@
 "require uci";
 "require baseclass";
 "require tools.widgets as widgets";
-"require view.harpynet.main as main";
+"require view.harpynet.main-v002 as main";
 
 function createSettingsContent(section) {
   let o = section.option(
@@ -276,17 +276,34 @@ function createSettingsContent(section) {
     _("List Update Frequency"),
     _("Select how often the domain or subnet lists are updated automatically"),
   );
-  Object.entries(main.UPDATE_INTERVAL_OPTIONS).forEach(([key, label]) => {
-    o.value(key, _(label));
-  });
+  o.value("1h", "Каждый час");
+  o.value("3h", "Каждые 3 часа");
+  o.value("12h", "Каждые 12 часов");
+  o.value("1d", "Каждый день");
+  o.value("3d", "Каждые 3 дня");
   o.default = "1d";
+  o.rmempty = false;
+
+  o = section.option(
+    form.ListValue,
+    "subscription_update_interval",
+    _("Subscription Update Frequency"),
+    _(
+      "Select how often HarpyNet downloads the subscription again to refresh access keys, servers and subscription information",
+    ),
+  );
+  o.value("3h", _("Every 3 hours"));
+  o.value("12h", _("Every 12 hours"));
+  o.value("1d", _("Every day"));
+  o.value("3d", _("Every 3 days"));
+  o.default = "12h";
   o.rmempty = false;
 
   o = section.option(
     form.Flag,
     "download_lists_via_proxy",
-    _("Download Lists via Proxy/VPN"),
-    _("Downloading all lists via specific Proxy/VPN"),
+    "Скачивать списки через прокси",
+    "Загружать списки доменов и подсетей через выбранную секцию Proxy",
   );
   o.default = "0";
   o.rmempty = false;
@@ -294,8 +311,8 @@ function createSettingsContent(section) {
   o = section.option(
     form.ListValue,
     "download_lists_via_proxy_section",
-    _("Download Lists via specific proxy section"),
-    _("Downloading all lists via specific Proxy/VPN"),
+    "Секция Proxy для загрузки списков",
+    "Выберите секцию Proxy, через которую HarpyNet будет загружать списки",
   );
 
   o.rmempty = false;
@@ -311,7 +328,7 @@ function createSettingsContent(section) {
 
     for (const secName in sections) {
       const sec = sections[secName];
-      if (sec[".type"] === "section" && sec['connection_type'] !== 'block' && sec['connection_type'] !== 'exclusion') {
+      if (sec[".type"] === "section" && sec['connection_type'] === 'proxy') {
         this.keylist.push(secName);
         this.vallist.push(secName);
       }
@@ -323,7 +340,7 @@ function createSettingsContent(section) {
   o = section.option(
     form.Flag,
     "dont_touch_dhcp",
-    _("Dont Touch My DHCP!"),
+    "Не изменять DHCP",
     _("HarpyNet will not modify your DHCP configuration"),
   );
   o.default = "0";
@@ -400,9 +417,7 @@ function createSettingsContent(section) {
     form.Flag,
     "exclude_ntp",
     _("Exclude NTP"),
-    _(
-      "Exclude NTP protocol traffic from the tunnel to prevent it from being routed through the proxy or VPN",
-    ),
+    "Синхронизация времени будет идти напрямую, минуя HarpyNet",
   );
   o.default = "0";
   o.rmempty = false;

@@ -4,7 +4,7 @@
 "require ui";
 "require uci";
 "require fs";
-"require view.harpynet.main as main";
+"require view.harpynet.main-v002 as main";
 
 function createDashboardContent(section) {
   const o = section.option(form.DummyValue, "_mount_node");

@@ -36,6 +36,8 @@ export namespace HarpyNet {
   // check_sing_box          Check sing-box installation and status
   // check_logs              Show harpynet logs from system journal
   // check_sing_box_logs     Show sing-box logs
+  // get_subscription_cache  Get cached subscription links for dashboard
+  // get_subscription_metadata Get subscription traffic and expiry metadata
   // check_fakeip            Test FakeIP on router
   // clash_api               Clash API interface for managing proxies and groups
   // show_config             Display current harpynet configuration
@@ -56,6 +58,7 @@ export namespace HarpyNet {
     CHECK_SING_BOX = 'check_sing_box',
     GET_SING_BOX_STATUS = 'get_sing_box_status',
     CLASH_API = 'clash_api',
+    SUBSCRIPTION_UPDATE = 'subscription_update',
     RESTART = 'restart',
     START = 'start',
     STOP = 'stop',
@@ -64,7 +67,11 @@ export namespace HarpyNet {
     GLOBAL_CHECK = 'global_check',
     SHOW_SING_BOX_CONFIG = 'show_sing_box_config',
     CHECK_LOGS = 'check_logs',
+    GET_SUBSCRIPTION_CACHE = 'get_subscription_cache',
+    GET_SUBSCRIPTION_METADATA = 'get_subscription_metadata',
     GET_SYSTEM_INFO = 'get_system_info',
+    GET_DIRECT_CONNECTIONS = 'get_direct_connections',
+    GET_DHCP_CLIENTS = 'get_dhcp_clients',
   }
 
   export enum AvailableClashAPIMethods {
@@ -72,6 +79,9 @@ export namespace HarpyNet {
     GET_PROXY_LATENCY = 'get_proxy_latency',
     GET_GROUP_LATENCY = 'get_group_latency',
     SET_GROUP_PROXY = 'set_group_proxy',
+    GET_CONNECTIONS = 'get_connections',
+    CLOSE_CONNECTION = 'close_connection',
+    CLOSE_ALL_CONNECTIONS = 'close_all_connections',
   }
 
   export interface Outbound {
@@ -80,53 +90,45 @@ export namespace HarpyNet {
     latency: number;
     type: string;
     selected: boolean;
+    link?: string;
+    canCopyLink?: boolean;
+    country?: string;
   }
 
   export interface OutboundGroup {
     withTagSelect: boolean;
     code: string;
+    sectionName: string;
     displayName: string;
+    latencyTestCode?: string;
+    subscriptionSourceCount?: number;
+    subscriptionMetadata?: SubscriptionMetadata[];
     outbounds: Outbound[];
   }
 
-  export interface ConfigProxyUrlTestSection {
-    connection_type: 'proxy';
-    proxy_config_type: 'urltest';
-    urltest_proxy_links: string[];
-  }
-
-  export interface ConfigProxySelectorSection {
-    connection_type: 'proxy';
-    proxy_config_type: 'selector';
-    selector_proxy_links: string[];
-  }
-
-  export interface ConfigProxyUrlSection {
-    connection_type: 'proxy';
-    proxy_config_type: 'url';
-    proxy_string: string;
+  export interface SubscriptionMetadata {
+    version?: number;
+    title?: string;
+    traffic?: {
+      upload?: number;
+      download?: number;
+      used?: number;
+      total?: number;
+      remaining?: number;
+      isUnlimited?: boolean;
+    };
+    expire?: number;
+    refillDate?: number;
+    webPageUrl?: string;
+    supportUrl?: string;
+    announce?: string;
+    announceUrl?: string;
   }
 
   export interface ConfigProxySubscriptionSection {
     connection_type: 'proxy';
     proxy_config_type: 'subscription';
     subscription_url: string;
-    subscription_mode?: 'selector' | 'urltest';
-  }
-
-  export interface ConfigProxyOutboundSection {
-    connection_type: 'proxy';
-    proxy_config_type: 'outbound';
-    outbound_json: string;
-  }
-
-  export interface ConfigVpnSection {
-    connection_type: 'vpn';
-    interface: string;
-  }
-
-  export interface ConfigBlockSection {
-    connection_type: 'block';
   }
 
   export interface ConfigExclusionSection {
@@ -134,13 +136,7 @@ export namespace HarpyNet {
   }
 
   export type ConfigBaseSection =
-    | ConfigProxyUrlTestSection
-    | ConfigProxySelectorSection
-    | ConfigProxyUrlSection
     | ConfigProxySubscriptionSection
-    | ConfigProxyOutboundSection
-    | ConfigVpnSection
-    | ConfigBlockSection
     | ConfigExclusionSection;
 
   export type ConfigSection = ConfigBaseSection & {

@@ -78,23 +78,19 @@ check_requirements() {
     if has_outbound_section; then
         log "Outbound section found" "debug"
     else
-        log "Outbound section not found. Please check your configuration file (missing proxy_string, selector_proxy_links, urltest_proxy_links, outbound_json, or interface). Aborted." "error"
+        log "Outbound section not found. Please configure a subscription URL. Aborted." "error"
         exit 1
     fi
 }
 
 _check_outbound_section() {
     local section="$1"
-    local proxy_string interface outbound_json urltest_proxy_links
+    local subscription_url interface
 
-    config_get proxy_string "$section" "proxy_string"
-    config_get selector_proxy_links "$section" "selector_proxy_links"
-    config_get urltest_proxy_links "$section" "urltest_proxy_links"
-    config_get outbound_json "$section" "outbound_json"
+    config_get subscription_url "$section" "subscription_url"
     config_get interface "$section" "interface"
 
-    if [ -n "$proxy_string" ] || [ -n "$selector_proxy_links" ] || [ -n "$urltest_proxy_links" ] ||
-        [ -n "$outbound_json" ] || [ -n "$interface" ]; then
+    if [ -n "$subscription_url" ] || [ -n "$interface" ]; then
         section_exists=0
     fi
 }
@@ -126,18 +122,22 @@ start_main() {
     mkdir -p "$TMP_SING_BOX_FOLDER"
     mkdir -p "$TMP_RULESET_FOLDER"
 
-    # base
+    # Build and validate the sing-box configuration before changing routing.
+    # Subscription failures must not leave the router without working internet.
+    sing_box_configure_service
+    sing_box_init_config
+
+    # Apply network changes only after configuration generation succeeds.
     route_table_rule_mark
     create_nft_rules
-    sing_box_configure_service
-
-    # sing-box
-    sing_box_init_config
     config_foreach add_cron_job "section"
+    add_subscription_cron_job
     /etc/init.d/sing-box start
 
     log "Nice"
-    list_update &
+    # Detach the background updater from RPC stdout/stderr so LuCI exec calls
+    # can finish as soon as the service restart has completed.
+    list_update >/dev/null 2>&1 &
     echo $! > /var/run/harpynet_list_update.pid
 }
 
@@ -177,9 +177,32 @@ stop_main() {
 }
 
 start() {
-    start_main
-
+    local dont_touch_dhcp shutdown_correctly
     config_get_bool dont_touch_dhcp "settings" "dont_touch_dhcp" 0
+    config_get shutdown_correctly "settings" "shutdown_correctly" 1
+
+    if [ "$shutdown_correctly" -eq 0 ]; then
+        log "Recovering network state after an interrupted HarpyNet shutdown" "warn"
+        if [ "$dont_touch_dhcp" -eq 0 ]; then
+            dnsmasq_restore
+        fi
+        stop_main
+        uci_set "harpynet" "settings" "shutdown_correctly" 1
+        uci commit "harpynet"
+        config_load "$HARPYNET_CONFIG"
+    fi
+
+    if ! (start_main); then
+        log "HarpyNet failed to start. Restoring router network settings." "error"
+        stop_main
+        if [ "$dont_touch_dhcp" -eq 0 ]; then
+            dnsmasq_restore
+        fi
+        uci_set "harpynet" "settings" "shutdown_correctly" 1
+        uci commit "harpynet"
+        exit 1
+    fi
+
     if [ "$dont_touch_dhcp" -eq 0 ]; then
         dnsmasq_configure
     fi
@@ -368,13 +391,18 @@ dnsmasq_configure() {
 
     backup_dnsmasq_config_option "noresolv" "harpynet_noresolv"
     backup_dnsmasq_config_option "cachesize" "harpynet_cachesize"
+    backup_dnsmasq_config_option "logqueries" "harpynet_logqueries"
+    backup_dnsmasq_config_option "logfacility" "harpynet_logfacility"
 
     log "Configure dnsmasq for sing-box"
     uci_add_list "dhcp" "@dnsmasq[0]" "server" "$SB_DNS_INBOUND_ADDRESS"
     uci_set "dhcp" "@dnsmasq[0]" "noresolv" 1
     uci_set "dhcp" "@dnsmasq[0]" "cachesize" 0
+    uci_set "dhcp" "@dnsmasq[0]" "logqueries" 1
+    uci_set "dhcp" "@dnsmasq[0]" "logfacility" "$DNS_LOG_FILE"
     uci_commit "dhcp"
 
+    : > "$DNS_LOG_FILE"
     /etc/init.d/dnsmasq restart
 }
 
@@ -387,7 +415,7 @@ dnsmasq_restore() {
         return 0
     fi
 
-    local cachesize noresolv backup_servers resolvfile
+    local cachesize noresolv logqueries logfacility backup_servers resolvfile
     log "Restoring cachesize" "debug"
     cachesize="$(uci_get "dhcp" "@dnsmasq[0]" "harpynet_cachesize")"
     if [ -z "$cachesize" ]; then
@@ -405,6 +433,23 @@ dnsmasq_restore() {
     else
         uci_set "dhcp" "@dnsmasq[0]" "noresolv" "$noresolv"
         uci_remove "dhcp" "@dnsmasq[0]" "harpynet_noresolv"
+    fi
+
+    log "Restoring DNS query logging" "debug"
+    logqueries="$(uci_get "dhcp" "@dnsmasq[0]" "harpynet_logqueries")"
+    if [ -z "$logqueries" ]; then
+        uci_remove "dhcp" "@dnsmasq[0]" "logqueries"
+    else
+        uci_set "dhcp" "@dnsmasq[0]" "logqueries" "$logqueries"
+        uci_remove "dhcp" "@dnsmasq[0]" "harpynet_logqueries"
+    fi
+
+    logfacility="$(uci_get "dhcp" "@dnsmasq[0]" "harpynet_logfacility")"
+    if [ -z "$logfacility" ]; then
+        uci_remove "dhcp" "@dnsmasq[0]" "logfacility"
+    else
+        uci_set "dhcp" "@dnsmasq[0]" "logfacility" "$logfacility"
+        uci_remove "dhcp" "@dnsmasq[0]" "harpynet_logfacility"
     fi
 
     log "Restoring DNS servers" "debug"
@@ -475,8 +520,57 @@ add_cron_job() {
 }
 
 remove_cron_job() {
-    (crontab -l | grep -v "/usr/bin/harpynet list_update") | crontab -
+    (crontab -l |
+        grep -v "/usr/bin/harpynet list_update" |
+        grep -v "/usr/bin/harpynet subscription_update") | crontab -
     log "The cron job removed"
+}
+
+add_subscription_cron_job() {
+    local subscription_update_interval subscription_cron_job
+    config_get subscription_update_interval "settings" "subscription_update_interval" "12h"
+
+    case "$subscription_update_interval" in
+    "3h")
+        subscription_cron_job="27 */3 * * * /usr/bin/harpynet subscription_update"
+        ;;
+    "12h")
+        subscription_cron_job="27 */12 * * * /usr/bin/harpynet subscription_update"
+        ;;
+    "1d")
+        subscription_cron_job="27 9 * * * /usr/bin/harpynet subscription_update"
+        ;;
+    "3d")
+        subscription_cron_job="27 9 */3 * * /usr/bin/harpynet subscription_update"
+        ;;
+    *)
+        log "Invalid subscription_update_interval value: $subscription_update_interval" "warn"
+        return 1
+        ;;
+    esac
+
+    (crontab -l | grep -v "/usr/bin/harpynet subscription_update"; echo "$subscription_cron_job") | crontab -
+    log "The subscription cron job has been created: $subscription_cron_job"
+}
+
+subscription_update() {
+    local lock_dir="/var/run/harpynet-subscription-update.lock"
+
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        log "Subscription update is already running, skipping" "warn"
+        return 0
+    fi
+
+    trap "rmdir '$lock_dir' 2>/dev/null" EXIT INT TERM
+    log "Starting scheduled subscription update"
+
+    if /etc/init.d/harpynet restart >/dev/null 2>&1; then
+        log "Subscription update completed successfully"
+        echo '{"success":true}'
+    else
+        log "Subscription update failed; the previous working configuration was restored" "error"
+        return 1
+    fi
 }
 
 list_update() {
@@ -619,23 +713,142 @@ sing_box_configure_outbounds() {
     config_foreach configure_outbound_handler "section"
 }
 
+save_subscription_metadata() {
+    local section="$1"
+    local headers_file="$2"
+    local metadata_file="/var/run/harpynet/subscription-$section.meta.json"
+    local title userinfo web_page_url support_url announce announce_url refill_date
+    local upload=0 download=0 total=0 expire=0 used=0 remaining=0
+
+    [ -f "$headers_file" ] || return 0
+    echo "$section" | grep -Eq '^[A-Za-z0-9_-]+$' || return 0
+
+    subscription_header() {
+        local header_name="$1"
+        awk -v name="$header_name" '
+            {
+                line = $0
+                sub(/\r$/, "", line)
+                prefix = substr(line, 1, length(name) + 1)
+                if (tolower(prefix) == tolower(name ":")) {
+                    sub(/^[^:]+:[[:space:]]*/, "", line)
+                    value = line
+                }
+            }
+            END { print value }
+        ' "$headers_file"
+    }
+
+    title="$(subscription_header "profile-title")"
+    if [ -n "$title" ]; then
+        local decoded_title
+        decoded_title="$(printf '%s' "${title#base64:}" | base64 -d 2>/dev/null)"
+        [ -n "$decoded_title" ] && title="$decoded_title"
+    fi
+    userinfo="$(subscription_header "subscription-userinfo")"
+    web_page_url="$(subscription_header "profile-web-page-url")"
+    support_url="$(subscription_header "support-url")"
+    announce="$(subscription_header "announce")"
+    if [ -n "$announce" ]; then
+        local decoded_announce
+        decoded_announce="$(printf '%s' "${announce#base64:}" | base64 -d 2>/dev/null)"
+        [ -n "$decoded_announce" ] && announce="$decoded_announce"
+    fi
+    announce_url="$(subscription_header "announce-url")"
+    refill_date="$(subscription_header "subscription-refill-date")"
+
+    local item key value
+    local old_ifs="$IFS"
+    IFS=';'
+    for item in $userinfo; do
+        key="$(printf '%s' "$item" | cut -d= -f1 | tr -d ' \t\r\n' | tr 'A-Z' 'a-z')"
+        value="$(printf '%s' "$item" | cut -d= -f2- | tr -d ' \t\r\n')"
+        case "$key" in
+        upload) upload="${value:-0}" ;;
+        download) download="${value:-0}" ;;
+        total) total="${value:-0}" ;;
+        expire) expire="${value:-0}" ;;
+        esac
+    done
+    IFS="$old_ifs"
+
+    used=$((upload + download))
+    if [ "$total" -gt "$used" ] 2>/dev/null; then
+        remaining=$((total - used))
+    fi
+
+    mkdir -p /var/run/harpynet
+    jq -n \
+        --arg title "$title" \
+        --arg webPageUrl "$web_page_url" \
+        --arg supportUrl "$support_url" \
+        --arg announce "$announce" \
+        --arg announceUrl "$announce_url" \
+        --argjson upload "${upload:-0}" \
+        --argjson download "${download:-0}" \
+        --argjson used "${used:-0}" \
+        --argjson total "${total:-0}" \
+        --argjson remaining "${remaining:-0}" \
+        --argjson expire "${expire:-0}" \
+        --argjson refillDate "${refill_date:-0}" '
+        {
+            version: 1,
+            title: $title,
+            traffic: {
+                upload: $upload,
+                download: $download,
+                used: $used,
+                total: $total,
+                remaining: $remaining,
+                isUnlimited: ($total <= 0)
+            },
+            expire: $expire,
+            refillDate: $refillDate,
+            webPageUrl: $webPageUrl,
+            supportUrl: $supportUrl,
+            announce: $announce,
+            announceUrl: $announceUrl
+        }
+        | with_entries(select(.value != "" and .value != 0))
+        | if (.traffic.total == 0 and .traffic.used == 0) then del(.traffic) else . end
+    ' > "$metadata_file"
+}
+
 download_subscription_proxy_links() {
     local url="$1"
-    local tmpfile decoded_tmpfile http_proxy_address user_agent hwid device_model os_version links
+    local section="$2"
+    local tmpfile decoded_tmpfile headers_file http_proxy_address user_agent hwid device_model os_version links
 
     tmpfile=$(mktemp)
     decoded_tmpfile=$(mktemp)
+    headers_file=$(mktemp)
     http_proxy_address="$(get_service_proxy_address)"
     user_agent="$(get_harpynet_user_agent)"
     hwid="$(get_device_hwid)"
     device_model="$(get_device_model)"
     os_version="$(sed -n "s/^DISTRIB_RELEASE='\([^']*\)'.*/\1/p" /etc/openwrt_release 2>/dev/null)"
 
-    download_to_file "$url" "$tmpfile" "$http_proxy_address" 3 2 "$user_agent" "$hwid" "$device_model" "$os_version"
-    if [ $? -ne 0 ] || [ ! -s "$tmpfile" ]; then
-        rm -f "$tmpfile" "$decoded_tmpfile"
+    local download_result=1
+    if command -v curl >/dev/null 2>&1; then
+        local proxy_args=""
+        [ -n "$http_proxy_address" ] && proxy_args="-x http://$http_proxy_address"
+        curl -s -L --connect-timeout 5 --max-time 25 $proxy_args \
+            -D "$headers_file" \
+            -H "User-Agent: $user_agent" \
+            -H "x-hwid: $hwid" \
+            -H "x-device-os: OpenWrt" \
+            -H "x-ver-os: $os_version" \
+            -H "x-device-model: $device_model" \
+            -o "$tmpfile" "$url" && download_result=0
+    else
+        download_to_file "$url" "$tmpfile" "$http_proxy_address" 3 2 "$user_agent" "$hwid" "$device_model" "$os_version" "$headers_file" &&
+            download_result=0
+    fi
+    if [ "$download_result" -ne 0 ] || [ ! -s "$tmpfile" ]; then
+        rm -f "$tmpfile" "$decoded_tmpfile" "$headers_file"
         return 1
     fi
+    save_subscription_metadata "$section" "$headers_file"
 
     convert_crlf_to_lf "$tmpfile"
     if base64 -d "$tmpfile" > "$decoded_tmpfile" 2>/dev/null && [ -s "$decoded_tmpfile" ]; then
@@ -646,12 +859,109 @@ download_subscription_proxy_links() {
     links="$(
         grep -Eo '(ss|ssr|vmess|vless|trojan|hysteria2|hy2|tuic|socks)://[^[:space:]\"'"'"'<>]+' "$tmpfile" |
             sed 's/[,;)]*$//' |
-            sort -u
+            awk '!seen[$0]++'
     )"
 
-    rm -f "$tmpfile" "$decoded_tmpfile"
+    if [ -z "$links" ] && grep -q '^proxies:' "$tmpfile"; then
+        links="$(
+            awk '
+            function trim(v) {
+                sub(/^[[:space:]]+/, "", v)
+                sub(/[[:space:]]+$/, "", v)
+                return v
+            }
+            function value(line) {
+                sub(/^[^:]+:[[:space:]]*/, "", line)
+                gsub(/^'\''|'\''$/, "", line)
+                gsub(/^"|"$/, "", line)
+                return trim(line)
+            }
+            function urlencode(value,    i, c, out) {
+                out = ""
+                for (i = 1; i <= length(value); i++) {
+                    c = substr(value, i, 1)
+                    if (c ~ /^[A-Za-z0-9._~-]$/) {
+                        out = out c
+                    } else if (c == " ") {
+                        out = out "%20"
+                    } else if (c == "%") {
+                        out = out "%25"
+                    } else if (c == "#") {
+                        out = out "%23"
+                    } else {
+                        out = out c
+                    }
+                }
+                return out
+            }
+            function add_param(key, val) {
+                if (val == "") return
+                query = query sep key "=" val
+                sep = "&"
+            }
+            function flush() {
+                if (type == "vless" && uuid != "" && server != "" && port != "") {
+                    query = ""
+                    sep = "?"
+                    add_param("type", network == "" ? "tcp" : network)
+                    add_param("security", public_key != "" ? "reality" : (tls == "true" ? "tls" : "none"))
+                    add_param("sni", servername)
+                    add_param("fp", fingerprint)
+                    add_param("pbk", public_key)
+                    add_param("sid", short_id)
+                    add_param("flow", flow)
+                    add_param("packetEncoding", packet_encoding)
+                    print "vless://" uuid "@" server ":" port query "#" urlencode(name)
+                }
+                name = type = server = port = uuid = network = packet_encoding = flow = tls = servername = public_key = short_id = fingerprint = ""
+            }
+            /^proxies:/ { in_proxies = 1; next }
+            /^proxy-groups:/ { flush(); in_proxies = 0 }
+            !in_proxies { next }
+            /^[[:space:]]*-[[:space:]]/ { flush() }
+            /^[[:space:]]*-[[:space:]]*name:/ { name = value($0); next }
+            /^[[:space:]]*name:/ { name = value($0); next }
+            /^[[:space:]]*type:/ { type = value($0); next }
+            /^[[:space:]]*server:/ { server = value($0); next }
+            /^[[:space:]]*port:/ { port = value($0); next }
+            /^[[:space:]]*uuid:/ { uuid = value($0); next }
+            /^[[:space:]]*network:/ { network = value($0); next }
+            /^[[:space:]]*packet-encoding:/ { packet_encoding = value($0); next }
+            /^[[:space:]]*flow:/ { flow = value($0); next }
+            /^[[:space:]]*tls:/ { tls = value($0); next }
+            /^[[:space:]]*servername:/ { servername = value($0); next }
+            /^[[:space:]]*public-key:/ { public_key = value($0); next }
+            /^[[:space:]]*short-id:/ { short_id = value($0); next }
+            /^[[:space:]]*client-fingerprint:/ { fingerprint = value($0); next }
+            END { flush() }
+            ' "$tmpfile" | awk '!seen[$0]++'
+        )"
+    fi
+
+    rm -f "$tmpfile" "$decoded_tmpfile" "$headers_file"
     [ -n "$links" ] || return 1
     printf '%s\n' "$links"
+}
+
+save_subscription_proxy_link_cache() {
+    local section="$1"
+    local links="$2"
+    local cache_dir="/var/run/harpynet"
+    local cache_file="$cache_dir/subscription-$section.links"
+    local i link outbound_tag
+
+    mkdir -p "$cache_dir"
+    : > "$cache_file"
+
+    i=1
+    while IFS= read -r link; do
+        [ -z "$link" ] && continue
+        outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
+        printf '%s\t%s\n' "$outbound_tag" "$link" >> "$cache_file"
+        i=$((i + 1))
+    done <<EOF
+$links
+EOF
 }
 
 configure_outbound_handler() {
@@ -661,187 +971,46 @@ configure_outbound_handler() {
     config_get connection_type "$section" "connection_type"
     case "$connection_type" in
     proxy)
-        log "Configuring outbound in proxy connection type for the $section section"
-        local proxy_config_type
-        config_get proxy_config_type "$section" "proxy_config_type"
+        log "Configuring subscription outbound for the $section section"
+        local subscription_url subscription_proxy_links udp_over_tcp i outbound_tag outbound_tags \
+            default_outbound selector_tag selector_outbounds
+        config_get subscription_url "$section" "subscription_url"
+        config_get udp_over_tcp "$section" "enable_udp_over_tcp"
 
-        case "$proxy_config_type" in
-        url)
-            log "Detected proxy configuration type: url" "debug"
-            local proxy_string udp_over_tcp
-            config_get proxy_string "$section" "proxy_string"
-            config_get udp_over_tcp "$section" "enable_udp_over_tcp"
+        if [ -z "$subscription_url" ]; then
+            log "Subscription URL is not set. Aborted." "fatal"
+            exit 1
+        fi
 
-            if [ -z "$proxy_string" ]; then
-                log "Proxy string is not set. Aborted." "fatal"
-                exit 1
+        subscription_proxy_links="$(download_subscription_proxy_links "$subscription_url" "$section")"
+        if [ -z "$subscription_proxy_links" ]; then
+            log "Subscription did not contain supported proxy links." "fatal"
+            exit 1
+        fi
+        save_subscription_proxy_link_cache "$section" "$subscription_proxy_links"
+        log "Subscription for '$section' loaded: $(printf '%s\n' "$subscription_proxy_links" | sed '/^$/d' | wc -l) proxy links" "info"
+
+        i=1
+        while IFS= read -r link; do
+            [ -z "$link" ] && continue
+            config="$(sing_box_cf_add_proxy_outbound "$config" "$section-$i" "$link" "$udp_over_tcp")"
+            outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
+            if [ -z "$outbound_tags" ]; then
+                outbound_tags="$outbound_tag"
+                default_outbound="$outbound_tag"
+            else
+                outbound_tags="$outbound_tags,$outbound_tag"
             fi
-            config=$(sing_box_cf_add_proxy_outbound "$config" "$section" "$proxy_string" "$udp_over_tcp")
-            ;;
-        subscription)
-            log "Detected proxy configuration type: subscription" "debug"
-            local subscription_url subscription_mode subscription_proxy_links udp_over_tcp i outbound_tag outbound_tags \
-                default_outbound selector_tag selector_outbounds urltest_tag urltest_outbounds urltest_check_interval \
-                urltest_tolerance urltest_testing_url
-            config_get subscription_url "$section" "subscription_url"
-            config_get subscription_mode "$section" "subscription_mode" "selector"
-            config_get udp_over_tcp "$section" "enable_udp_over_tcp"
-            config_get urltest_check_interval "$section" "urltest_check_interval" "3m"
-            config_get urltest_tolerance "$section" "urltest_tolerance" 50
-            config_get urltest_testing_url "$section" "urltest_testing_url" "https://www.gstatic.com/generate_204"
-
-            if [ -z "$subscription_url" ]; then
-                log "Subscription URL is not set. Aborted." "fatal"
-                exit 1
-            fi
-
-            subscription_proxy_links="$(download_subscription_proxy_links "$subscription_url")"
-            if [ -z "$subscription_proxy_links" ]; then
-                log "Subscription did not contain supported proxy links. Use a raw/base64 URI subscription for sing-box mode." "fatal"
-                exit 1
-            fi
-
-            i=1
-            while IFS= read -r link; do
-                [ -z "$link" ] && continue
-                config="$(sing_box_cf_add_proxy_outbound "$config" "$section-$i" "$link" "$udp_over_tcp")"
-                outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
-                if [ -z "$outbound_tags" ]; then
-                    outbound_tags="$outbound_tag"
-                    default_outbound="$outbound_tag"
-                else
-                    outbound_tags="$outbound_tags,$outbound_tag"
-                fi
-                i=$((i + 1))
-            done <<EOF
+            i=$((i + 1))
+        done <<EOF
 $subscription_proxy_links
 EOF
 
-            selector_tag="$(get_outbound_tag_by_section "$section")"
-            case "$subscription_mode" in
-            urltest)
-                urltest_tag="$(get_outbound_tag_by_section "$section-urltest")"
-                urltest_outbounds="$(comma_string_to_json_array "$outbound_tags")"
-                selector_outbounds="$(comma_string_to_json_array "$outbound_tags,$urltest_tag")"
-                config="$(sing_box_cm_add_urltest_outbound "$config" "$urltest_tag" "$urltest_outbounds" \
-                    "$urltest_testing_url" "$urltest_check_interval" "$urltest_tolerance")"
-                config="$(sing_box_cm_add_selector_outbound "$config" "$selector_tag" "$selector_outbounds" "$urltest_tag")"
-                ;;
-            *)
-                selector_outbounds="$(comma_string_to_json_array "$outbound_tags")"
-                config="$(sing_box_cm_add_selector_outbound "$config" "$selector_tag" "$selector_outbounds" \
-                    "$default_outbound")"
-                ;;
-            esac
-            ;;
-        outbound)
-            log "Detected proxy configuration type: outbound" "debug"
-            local json_outbound
-            config_get json_outbound "$section" "outbound_json"
-            config=$(sing_box_cf_add_json_outbound "$config" "$section" "$json_outbound")
-            ;;
-        selector)
-            log "Detected proxy configuration type: selector" "debug"
-            local selector_proxy_links udp_over_tcp i outbound_tags outbound_tag default_outbound
-            config_get selector_proxy_links "$section" "selector_proxy_links"
-            config_get udp_over_tcp "$section" "enable_udp_over_tcp"
-
-            if [ -z "$selector_proxy_links" ]; then
-                log "URLTest proxy links is not set. Aborted." "fatal"
-                exit 1
-            fi
-
-            i=1
-            for link in $selector_proxy_links; do
-                config="$(sing_box_cf_add_proxy_outbound "$config" "$section-$i" "$link" "$udp_over_tcp")"
-                outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
-                if [ -z "$outbound_tags" ]; then
-                    outbound_tags="$outbound_tag"
-                    default_outbound="$outbound_tag"
-                else
-                    outbound_tags="$outbound_tags,$outbound_tag"
-                fi
-                i=$((i + 1))
-            done
-
-            selector_tag="$(get_outbound_tag_by_section "$section")"
-            selector_outbounds="$(comma_string_to_json_array "$outbound_tags")"
-            config="$(sing_box_cm_add_selector_outbound "$config" "$selector_tag" "$selector_outbounds" \
-                "$default_outbound")"
-            ;;
-        urltest)
-            log "Detected proxy configuration type: urltest" "debug"
-            local urltest_proxy_links udp_over_tcp i urltest_tag selector_tag outbound_tag outbound_tags \
-                urltest_outbounds selector_outbounds urltest_check_interval urltest_tolerance urltest_testing_url
-            config_get urltest_proxy_links "$section" "urltest_proxy_links"
-            config_get udp_over_tcp "$section" "enable_udp_over_tcp"
-            config_get urltest_check_interval "$section" "urltest_check_interval" "3m"
-            config_get urltest_tolerance "$section" "urltest_tolerance" 50
-            config_get urltest_testing_url "$section" "urltest_testing_url" "https://www.gstatic.com/generate_204"
-
-            if [ -z "$urltest_proxy_links" ]; then
-                log "URLTest proxy links is not set. Aborted." "fatal"
-                exit 1
-            fi
-
-            i=1
-            for link in $urltest_proxy_links; do
-                config="$(sing_box_cf_add_proxy_outbound "$config" "$section-$i" "$link" "$udp_over_tcp")"
-                outbound_tag="$(get_outbound_tag_by_section "$section-$i")"
-                if [ -z "$outbound_tags" ]; then
-                    outbound_tags="$outbound_tag"
-                else
-                    outbound_tags="$outbound_tags,$outbound_tag"
-                fi
-                i=$((i + 1))
-            done
-
-            urltest_tag="$(get_outbound_tag_by_section "$section-urltest")"
-            selector_tag="$(get_outbound_tag_by_section "$section")"
-            urltest_outbounds="$(comma_string_to_json_array "$outbound_tags")"
-            selector_outbounds="$(comma_string_to_json_array "$outbound_tags,$urltest_tag")"
-            config="$(sing_box_cm_add_urltest_outbound "$config" "$urltest_tag" "$urltest_outbounds" \
-                "$urltest_testing_url" "$urltest_check_interval" "$urltest_tolerance")"
-            config="$(sing_box_cm_add_selector_outbound "$config" "$selector_tag" "$selector_outbounds" "$urltest_tag")"
-            ;;
-        *)
-            log "Unknown proxy configuration type: '$proxy_config_type'. Aborted." "fatal"
-            exit 1
-            ;;
-        esac
-        ;;
-    vpn)
-        log "Configuring outbound in VPN connection type for the $section section"
-        local interface_name domain_resolver_enabled domain_resolver_dns_type domain_resolver_dns_server \
-            domain_resolver_dns_server_address outbound_tag domain_resolver_tag dns_domain_resolver
-
-        config_get interface_name "$section" "interface"
-        config_get domain_resolver_enabled "$section" "domain_resolver_enabled"
-        config_get domain_resolver_dns_type "$section" "domain_resolver_dns_type"
-        config_get domain_resolver_dns_server "$section" "domain_resolver_dns_server"
-
-        if [ -z "$interface_name" ]; then
-            log "VPN interface is not set. Aborted." "fatal"
-            exit 1
-        fi
-
-        local outbound_tag
-        outbound_tag="$(get_outbound_tag_by_section "$section")"
-
-        if [ "$domain_resolver_enabled" -eq 1 ]; then
-            domain_resolver_dns_server_address="$(url_get_host "$dns_server")"
-            if ! is_ipv4 "$domain_resolver_dns_server_address"; then
-                dns_domain_resolver=$SB_BOOTSTRAP_SERVER_TAG
-            fi
-            domain_resolver_tag="$(get_domain_resolver_tag "$section")"
-            config=$(sing_box_cf_add_dns_server "$config" "$domain_resolver_dns_type" "$domain_resolver_tag" \
-                "$domain_resolver_dns_server" "$dns_domain_resolver" "$outbound_tag")
-        fi
-
-        config=$(sing_box_cm_add_interface_outbound "$config" "$outbound_tag" "$interface_name" "$domain_resolver_tag")
-        ;;
-    block)
-        log "Connection type 'block' detected for the $section section – no outbound will be created (handled via reject route rules)"
+        # A selector remains an internal sing-box requirement for manual node switching.
+        selector_tag="$(get_outbound_tag_by_section "$section")"
+        selector_outbounds="$(comma_string_to_json_array "$outbound_tags")"
+        config="$(sing_box_cm_add_selector_outbound "$config" "$selector_tag" "$selector_outbounds" \
+            "$default_outbound")"
         ;;
     exclusion)
         log "Connection type 'exclusion' detected for the $section section – no outbound will be created (handled via route rules)"
@@ -914,7 +1083,6 @@ sing_box_configure_route() {
     config=$(sing_box_cf_proxy_domain "$config" "$SB_TPROXY_INBOUND_TAG" "$CHECK_PROXY_IP_DOMAIN" "$first_outbound_tag")
     config=$(sing_box_cf_override_domain_port "$config" "$FAKEIP_TEST_DOMAIN" 8443)
 
-    configure_common_reject_route_rule
     configure_common_direct_route_rule
 
     local routing_excluded_ips
@@ -942,26 +1110,6 @@ include_source_ips_in_routing_handler() {
                 "$config" "$rule_tag" "$SB_TPROXY_INBOUND_TAG" "$(get_outbound_tag_by_section "$section")"
         )
         config_list_foreach "$section" "fully_routed_ips" include_source_ip_in_routing_handler "$rule_tag"
-    fi
-}
-
-configure_common_reject_route_rule() {
-    local block_sections block_section_lists_enabled
-    block_sections="$(get_sections_by_connection_type "block")"
-    block_section_lists_enabled=0
-
-    if [ -n "$block_sections" ]; then
-        for block_section in $block_sections; do
-            if section_has_enabled_lists "$block_section"; then
-                block_section_lists_enabled=1
-                break
-            fi
-        done
-        if [ "$block_section_lists_enabled" -eq 1 ]; then
-            config=$(sing_box_cm_add_reject_route_rule "$config" "$SB_REJECT_RULE_TAG" "$SB_TPROXY_INBOUND_TAG")
-        else
-            log "Block sections does not have any enabled list, reject rule is not required" "warn"
-        fi
     fi
 }
 
@@ -1022,13 +1170,10 @@ configure_routing_for_section_lists() {
     config_get_bool resolve_real_ip_for_routing "$section" "resolve_real_ip_for_routing" 0
 
     case "$section_connection_type" in
-    proxy | vpn)
+    proxy)
         route_rule_tag="$(gen_id)"
         outbound_tag=$(get_outbound_tag_by_section "$section")
         config=$(sing_box_cm_add_route_rule "$config" "$route_rule_tag" "$SB_TPROXY_INBOUND_TAG" "$outbound_tag")
-        ;;
-    block)
-        route_rule_tag="$SB_REJECT_RULE_TAG"
         ;;
     exclusion)
         route_rule_tag="$SB_EXCLUSION_RULE_TAG"
@@ -1097,6 +1242,11 @@ configure_community_list_handler() {
     config=$(sing_box_cm_add_remote_ruleset "$config" "$ruleset_tag" "$format" "$url" "$detour" "$update_interval")
     config=$(sing_box_cm_patch_route_rule "$config" "$route_rule_tag" "rule_set" "$ruleset_tag")
     config=$(sing_box_cm_patch_dns_route_rule "$config" "$SB_FAKEIP_DNS_RULE_TAG" "rule_set" "$ruleset_tag")
+
+    if [ "$tag" = "discord" ]; then
+        config=$(sing_box_cm_patch_route_rule \
+            "$config" "$route_rule_tag" "ip_cidr" "$DISCORD_VOICE_IPV4_CIDRS")
+    fi
 }
 
 prepare_source_ruleset() {
@@ -1408,7 +1558,7 @@ import_community_service_subnet_list_handler() {
         URL=$SUBNETS_DISCORD
         nft_create_ipv4_set "$NFT_TABLE_NAME" "$NFT_DISCORD_SET_NAME"
         nft add rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" ip daddr \
-            "@$NFT_DISCORD_SET_NAME" udp dport '{ 19000-20000, 50000-65535 }' meta mark set "$NFT_FAKEIP_MARK" counter
+            "@$NFT_DISCORD_SET_NAME" udp dport '{ 3478-3481, 19000-20000, 50000-65535 }' meta mark set "$NFT_FAKEIP_MARK" counter
         ;;
     "roblox")
         URL=$SUBNETS_ROBLOX
@@ -1623,7 +1773,7 @@ _determine_first_outbound_section() {
     local connection_type
     config_get connection_type "$section" "connection_type"
 
-    if [ "$connection_type" = "proxy" ] || [ "$connection_type" = "vpn" ]; then
+    if [ "$connection_type" = "proxy" ]; then
         [ -z "$first_section" ] && first_section="$1"
     fi
 }
@@ -1761,12 +1911,20 @@ check_proxy() {
 
     nolog "Checking proxy connection..."
 
+    local latency_response latency_value
+    latency_response="$(clash_api get_group_latency main-out 8000 2> /dev/null)"
+    latency_value="$(echo "$latency_response" | jq -r '[.[]? | select(type == "number")][0] // empty' 2> /dev/null)"
+    if [ -n "$latency_value" ]; then
+        nolog "Proxy latency: ${latency_value}ms"
+        return 0
+    fi
+
     for attempt in $(seq 1 5); do
-        response=$(sing-box tools fetch ifconfig.me -D /etc/sing-box 2> /dev/null)
+        response=$(sing-box tools fetch ifconfig.me -D /etc/sing-box --outbound main-out 2> /dev/null)
         if echo "$response" | grep -q "^<html\|403 Forbidden"; then
             continue
         fi
-        if [[ $response =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if echo "$response" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
             ip=$(echo "$response" | sed -n 's/^[0-9]\+\.[0-9]\+\.[0-9]\+\.\([0-9]\+\)$/X.X.X.\1/p')
             nolog "$ip - should match proxy IP"
             return 0
@@ -1885,6 +2043,50 @@ check_logs() {
     fi
 }
 
+get_subscription_cache() {
+    local section="$1"
+    local cache_file="/var/run/harpynet/subscription-$section.links"
+
+    if ! echo "$section" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+        echo "{}"
+        return 0
+    fi
+
+    if [ ! -f "$cache_file" ]; then
+        echo "{}"
+        return 0
+    fi
+
+    jq -Rn '
+        reduce inputs as $line (
+            {};
+            ($line | split("\t")) as $item |
+            if (($item[0] // "") != "" and ($item[1] // "") != "") then
+                .[$item[0]] = $item[1]
+            else
+                .
+            end
+        )
+    ' < "$cache_file"
+}
+
+get_subscription_metadata() {
+    local section="$1"
+    local metadata_file="/var/run/harpynet/subscription-$section.meta.json"
+
+    if ! echo "$section" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+        echo "{}"
+        return 0
+    fi
+
+    if [ ! -s "$metadata_file" ]; then
+        echo "{}"
+        return 0
+    fi
+
+    jq . "$metadata_file" 2>/dev/null || echo "{}"
+}
+
 show_sing_box_config() {
     local sing_box_config_path
     config_get sing_box_config_path "settings" "config_path"
@@ -1929,10 +2131,7 @@ show_config() {
 
     tmp_config=$(mktemp)
 
-    sed -e 's/\(option proxy_string\).*/\1 '\''MASKED'\''/g' \
-        -e '/option outbound_json/,/^}/c\	option outbound_json '\''MASKED'\''' \
-        -e 's/\(list urltest_proxy_links\).*/\1 '\''MASKED'\''/g' \
-        -e 's/\(list selector_proxy_links\).*/\1 '\''MASKED'\''/g' \
+    sed -e 's/\(option subscription_url\).*/\1 '\''MASKED'\''/g' \
         -e "s@\\(option dns_server '[^/]*\\)/[^']*'@\\1/MASKED'@g" \
         -e "s@\\(option domain_resolver_dns_server '[^/]*\\)/[^']*'@\\1/MASKED'@g" \
         -e 's/\(option yacd_secret_key\).*/\1 '\''MASKED'\''/g' \
@@ -2302,17 +2501,25 @@ check_fakeip() {
 #######################################
 # Clash API interface for managing proxies and groups
 # Arguments:
-#   $1 - Action: get_proxies, get_proxy_latency, get_group_latency, set_group_proxy
+#   $1 - Action: get_proxies, get_connections, get_proxy_latency, get_group_latency, set_group_proxy,
+#        close_connection, close_all_connections
 #   $2 - Proxy/Group tag (required for latency and set operations)
 #   $3 - Timeout in ms (optional, defaults: 2000 for proxy, 5000 for group) or target proxy tag for set_group_proxy
 # Outputs:
 #   JSON formatted response
 # Usage:
 #   clash_api get_proxies
+#   clash_api get_connections
 #   clash_api get_proxy_latency <proxy_tag> [timeout]
 #   clash_api get_group_latency <group_tag> [timeout]
 #   clash_api set_group_proxy <group_tag> <proxy_tag>
+#   clash_api close_connection <connection_id>
+#   clash_api close_all_connections
 #######################################
+
+clash_api_urlencode_path_segment() {
+    jq -nr --arg v "$1" '$v|@uri'
+}
 
 clash_api() {
     local action="$1"
@@ -2337,6 +2544,10 @@ clash_api() {
     case "$action" in
     get_proxies)
         curl -s --header "$auth_header" "$CLASH_URL/proxies" | jq .
+        ;;
+
+    get_connections)
+        curl -s --header "$auth_header" "$CLASH_URL/connections" | jq .
         ;;
 
     get_proxy_latency)
@@ -2419,8 +2630,72 @@ clash_api() {
         esac
         ;;
 
+    close_connection)
+        local connection_id="$2"
+
+        if [ -z "$connection_id" ]; then
+            echo '{"error":"connection_id required"}' | jq .
+            return 1
+        fi
+
+        local encoded_connection_id response http_code body
+        encoded_connection_id="$(clash_api_urlencode_path_segment "$connection_id")" || return 1
+        response=$(
+            curl -X DELETE -s -w "\n%{http_code}" "$CLASH_URL/connections/$encoded_connection_id" \
+                --header "$auth_header"
+        )
+        http_code=$(echo "$response" | tail -n 1)
+        body=$(echo "$response" | sed '$d')
+
+        case "$http_code" in
+        200 | 204)
+            jq -n --arg connection_id "$connection_id" '{success:true,connection_id:$connection_id}'
+            ;;
+        404)
+            jq -n --arg connection_id "$connection_id" '{success:false,error:"connection_not_found",connection_id:$connection_id}'
+            return 1
+            ;;
+        *)
+            if [ -n "$body" ]; then
+                local body_json
+                body_json=$(echo "$body" | jq -c . 2>/dev/null || jq -Rn --arg body "$body" '$body')
+                echo "{\"success\":false,\"http_code\":$http_code,\"body\":$body_json}" | jq .
+            else
+                echo "{\"success\":false,\"http_code\":$http_code}" | jq .
+            fi
+            return 1
+            ;;
+        esac
+        ;;
+
+    close_all_connections)
+        local response http_code body
+        response=$(
+            curl -X DELETE -s -w "\n%{http_code}" "$CLASH_URL/connections" \
+                --header "$auth_header"
+        )
+        http_code=$(echo "$response" | tail -n 1)
+        body=$(echo "$response" | sed '$d')
+
+        case "$http_code" in
+        200 | 204)
+            echo '{"success":true}' | jq .
+            ;;
+        *)
+            if [ -n "$body" ]; then
+                local body_json
+                body_json=$(echo "$body" | jq -c . 2>/dev/null || jq -Rn --arg body "$body" '$body')
+                echo "{\"success\":false,\"http_code\":$http_code,\"body\":$body_json}" | jq .
+            else
+                echo "{\"success\":false,\"http_code\":$http_code}" | jq .
+            fi
+            return 1
+            ;;
+        esac
+        ;;
+
     *)
-        echo '{"error":"unknown action","available":["get_proxies","get_proxy_latency","get_group_latency","set_group_proxy"]}' | jq .
+        echo '{"error":"unknown action","available":["get_proxies","get_connections","get_proxy_latency","get_group_latency","set_group_proxy","close_connection","close_all_connections"]}' | jq .
         return 1
         ;;
     esac
@@ -2749,6 +3024,240 @@ global_check() {
     fi
 }
 
+get_runtime_stats() {
+    local cpu_line_1 cpu_line_2 total_1 idle_1 total_2 idle_2 cpu_usage
+    local mem_total mem_available memory_usage temperature_raw temperature_c
+    local uptime_seconds wan_status wan_ip wan_device rx_bytes tx_bytes selected_server
+    local selected_proxy_uri selected_proxy_name
+
+    cpu_line_1="$(head -n 1 /proc/stat)"
+    sleep 1
+    cpu_line_2="$(head -n 1 /proc/stat)"
+
+    set -- $cpu_line_1
+    shift
+    total_1=0
+    for value in "$@"; do
+        total_1=$((total_1 + value))
+    done
+    idle_1=$(($4 + $5))
+
+    set -- $cpu_line_2
+    shift
+    total_2=0
+    for value in "$@"; do
+        total_2=$((total_2 + value))
+    done
+    idle_2=$(($4 + $5))
+
+    if [ "$total_2" -gt "$total_1" ]; then
+        cpu_usage=$((100 * ((total_2 - total_1) - (idle_2 - idle_1)) / (total_2 - total_1)))
+    else
+        cpu_usage=0
+    fi
+
+    mem_total="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)"
+    mem_available="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)"
+    if [ -n "$mem_total" ] && [ "$mem_total" -gt 0 ]; then
+        memory_usage=$((100 * (mem_total - mem_available) / mem_total))
+    else
+        memory_usage=0
+    fi
+
+    temperature_raw=""
+    for sensor in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp*_input; do
+        if [ -r "$sensor" ]; then
+            temperature_raw="$(cat "$sensor" 2> /dev/null)"
+            [ -n "$temperature_raw" ] && break
+        fi
+    done
+
+    if [ -n "$temperature_raw" ]; then
+        if [ "$temperature_raw" -ge 1000 ] 2> /dev/null; then
+            temperature_c="$(awk -v value="$temperature_raw" 'BEGIN { printf "%.1f", value / 1000 }')"
+        else
+            temperature_c="$temperature_raw"
+        fi
+    else
+        temperature_c="null"
+    fi
+
+    uptime_seconds="$(cut -d. -f1 /proc/uptime)"
+    wan_status="$(ubus call network.interface.wan status 2> /dev/null)"
+    wan_ip="$(printf '%s' "$wan_status" | jq -r '.["ipv4-address"][0].address // "-"' 2> /dev/null)"
+    wan_device="$(printf '%s' "$wan_status" | jq -r '.l3_device // .device // empty' 2> /dev/null)"
+
+    if [ -n "$wan_device" ] && [ -r "/sys/class/net/$wan_device/statistics/rx_bytes" ]; then
+        rx_bytes="$(cat "/sys/class/net/$wan_device/statistics/rx_bytes")"
+        tx_bytes="$(cat "/sys/class/net/$wan_device/statistics/tx_bytes")"
+    else
+        rx_bytes=0
+        tx_bytes=0
+    fi
+
+    selected_server="$(clash_api get_proxies 2> /dev/null | jq -r '.proxies["main-out"].now // "-"' 2> /dev/null)"
+    [ -n "$selected_server" ] || selected_server="-"
+    if [ "$selected_server" != "-" ]; then
+        selected_proxy_uri="$(get_subscription_cache "main" | jq -r --arg tag "$selected_server" '.[$tag] // empty' 2> /dev/null)"
+        if [ -n "$selected_proxy_uri" ] && [ "${selected_proxy_uri#*#}" != "$selected_proxy_uri" ]; then
+            selected_proxy_name="$(url_decode "${selected_proxy_uri#*#}")"
+            [ -n "$selected_proxy_name" ] && selected_server="$selected_proxy_name"
+        fi
+    fi
+
+    jq -cn \
+        --argjson cpu "$cpu_usage" \
+        --argjson memory "$memory_usage" \
+        --argjson temperature "$temperature_c" \
+        --argjson uptime "$uptime_seconds" \
+        --arg wan_ip "$wan_ip" \
+        --arg wan_device "$wan_device" \
+        --argjson rx_bytes "$rx_bytes" \
+        --argjson tx_bytes "$tx_bytes" \
+        --arg selected_server "$selected_server" \
+        '{
+            cpu: $cpu,
+            memory: $memory,
+            temperature: $temperature,
+            uptime: $uptime,
+            wan_ip: $wan_ip,
+            wan_device: $wan_device,
+            rx_bytes: $rx_bytes,
+            tx_bytes: $tx_bytes,
+            selected_server: $selected_server
+        }'
+}
+
+get_direct_connections() {
+    if [ ! -r /proc/net/nf_conntrack ]; then
+        echo '{"connections":[]}'
+        return 0
+    fi
+
+    local dns_log_tail
+    dns_log_tail="$(mktemp)"
+    if [ -r "$DNS_LOG_FILE" ]; then
+        tail -n 3000 "$DNS_LOG_FILE" > "$dns_log_tail"
+    else
+        : > "$dns_log_tail"
+    fi
+
+    awk '
+        FNR == NR {
+            if ($0 ~ / reply .* is [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                domain = $(NF - 2)
+                ip = $NF
+                dns[ip] = domain
+            }
+            next
+        }
+
+        function field_value(value) {
+            sub(/^[^=]+=/, "", value)
+            return value
+        }
+
+        {
+            network = $3
+            source = destination = source_port = destination_port = ""
+            upload = download = 0
+            direction = 0
+
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^src=/) {
+                    direction++
+                    if (direction == 1)
+                        source = field_value($i)
+                } else if ($i ~ /^dst=/ && direction == 1) {
+                    destination = field_value($i)
+                } else if ($i ~ /^sport=/ && direction == 1) {
+                    source_port = field_value($i)
+                } else if ($i ~ /^dport=/ && direction == 1) {
+                    destination_port = field_value($i)
+                } else if ($i ~ /^bytes=/ && direction == 1) {
+                    upload = field_value($i)
+                } else if ($i ~ /^bytes=/ && direction == 2) {
+                    download = field_value($i)
+                }
+            }
+
+            is_lan_source = source ~ /^10\./ ||
+                source ~ /^192\.168\./ ||
+                source ~ /^172\.(1[6-9]|2[0-9]|3[01])\./
+            is_local_destination = destination ~ /^10\./ ||
+                destination ~ /^127\./ ||
+                destination ~ /^169\.254\./ ||
+                destination ~ /^192\.168\./ ||
+                destination ~ /^172\.(1[6-9]|2[0-9]|3[01])\./ ||
+                destination ~ /^224\./ ||
+                destination ~ /^239\./
+            is_fake_ip = destination ~ /^198\.(1[89]|2[0-9]|3[01])\./
+
+            if (!is_lan_source || is_local_destination || is_fake_ip ||
+                source_port == "" || destination_port == "")
+                next
+
+            id = "direct-" network "-" source "-" source_port "-" destination "-" destination_port
+            print id "\t" source "\t" source_port "\t" destination "\t" dns[destination] "\t" \
+                destination_port "\t" network "\t" upload "\t" download
+        }
+    ' "$dns_log_tail" /proc/net/nf_conntrack | jq -Rn '
+        {
+            connections: [
+                inputs |
+                split("\t") |
+                {
+                    id: .[0],
+                    direct: true,
+                    metadata: {
+                        sourceIP: .[1],
+                        sourcePort: .[2],
+                        destinationIP: .[3],
+                        host: .[4],
+                        destinationPort: .[5],
+                        network: .[6],
+                        type: .[6]
+                    },
+                    chains: ["direct-out"],
+                    rule: "direct-out",
+                    upload: (.[7] | tonumber),
+                    download: (.[8] | tonumber)
+                }
+            ]
+        }
+    '
+    rm -f "$dns_log_tail"
+}
+
+get_dhcp_clients() {
+    awk '
+        FILENAME == "/tmp/dhcp.leases" {
+            if ($3 != "" && $4 != "" && $4 != "*")
+                print $3 "\t" $4
+            next
+        }
+
+        NF >= 2 && $1 !~ /^#/ {
+            if ($1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 != "" && $2 != "*")
+                print $1 "\t" $2
+        }
+    ' /tmp/dhcp.leases /tmp/hosts/dhcp.* 2>/dev/null | jq -Rn '
+        {
+            clients: (
+                reduce inputs as $line (
+                    {};
+                    ($line | split("\t")) as $item |
+                    if ($item[0] and $item[1]) then
+                        .[$item[0]] = $item[1]
+                    else
+                        .
+                    end
+                )
+            )
+        }
+    '
+}
+
 show_help() {
     cat << EOF
 Usage: $0 COMMAND
@@ -2760,12 +3269,15 @@ Available commands:
     restart                 Restart harpynet service
     main                    Run main harpynet process
     list_update             Update domain lists
+    subscription_update     Update subscription and reload HarpyNet
     check_proxy             Check proxy connectivity
     check_nft               Check NFT rules
     check_nft_rules         Check NFT rules status
     check_sing_box          Check sing-box installation and status
     check_logs              Show harpynet logs from system journal
     check_sing_box_logs     Show sing-box logs
+    get_subscription_cache   Get cached subscription links for dashboard
+    get_subscription_metadata Get subscription traffic and expiry metadata
     check_fakeip            Test FakeIP on router
     clash_api               Clash API interface for managing proxies and groups
     show_config             Display current harpynet configuration
@@ -2776,6 +3288,9 @@ Available commands:
     get_status              Get harpynet service status
     get_sing_box_status     Get sing-box service status
     get_system_info         Get system information in JSON format
+    get_runtime_stats       Get CPU, memory and temperature statistics
+    get_direct_connections  Get active connections routed without VPN
+    get_dhcp_clients        Get DHCP client names by IP
     check_dns_available     Check DNS server availability
     global_check            Run global system check
 EOF
@@ -2800,6 +3315,9 @@ main)
 list_update)
     list_update
     ;;
+subscription_update)
+    subscription_update
+    ;;
 check_proxy)
     check_proxy
     ;;
@@ -2817,6 +3335,12 @@ check_logs)
     ;;
 check_sing_box_logs)
     check_sing_box_logs
+    ;;
+get_subscription_cache)
+    get_subscription_cache "$2"
+    ;;
+get_subscription_metadata)
+    get_subscription_metadata "$2"
     ;;
 check_fakeip)
     check_fakeip
@@ -2847,6 +3371,15 @@ get_sing_box_status)
     ;;
 get_system_info)
     get_system_info
+    ;;
+get_runtime_stats)
+    get_runtime_stats
+    ;;
+get_direct_connections)
+    get_direct_connections
+    ;;
+get_dhcp_clients)
+    get_dhcp_clients
     ;;
 check_dns_available)
     check_dns_available

@@ -278,16 +278,21 @@ download_to_file() {
     local hwid="${7:-}"
     local device_model="${8:-}"
     local os_version="${9:-}"
+    local headers_file="${10:-}"
 
     for attempt in $(seq 1 "$retries"); do
         local result=1
 
         if [ -n "$user_agent" ] && [ -n "$hwid" ] && command -v curl >/dev/null 2>&1; then
             local proxy_opts=""
+            local headers_opts=""
             if [ -n "$http_proxy_address" ]; then
                 proxy_opts="-x http://$http_proxy_address"
             fi
-            curl -s -L --connect-timeout 5 --max-time 25 $proxy_opts \
+            if [ -n "$headers_file" ]; then
+                headers_opts="-D $headers_file"
+            fi
+            curl -s -L --connect-timeout 5 --max-time 25 $proxy_opts $headers_opts \
                 -H "User-Agent: $user_agent" \
                 -H "x-hwid: $hwid" \
                 -H "x-device-os: OpenWrt" \

@@ -1,10 +1,11 @@
 // language=CSS
-import { DashboardTab, DiagnosticTab } from './harpynet';
+import { DashboardTab, DiagnosticTab, LogsTab } from './harpynet';
 import { PartialStyles } from './partials';
 
 export const GlobalStyles = `
 ${DashboardTab.styles}
 ${DiagnosticTab.styles}
+${LogsTab.styles}
 ${PartialStyles}
 
 
