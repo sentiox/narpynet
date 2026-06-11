@@ -424,6 +424,7 @@ function createSectionContent(section) {
   );
   o.value("proxy", "Умный обход");
   o.value("full_proxy", "Полный VPN");
+  o.value("full_proxy_bypass_ru", "Полный VPN без РФ");
   o.value("exclusion", "Выключить VPN");
 
   o = section.option(
@@ -436,6 +437,7 @@ function createSectionContent(section) {
   o.default = "subscription";
   o.depends("connection_type", "proxy");
   o.depends("connection_type", "full_proxy");
+  o.depends("connection_type", "full_proxy_bypass_ru");
 
   o = section.option(
     form.Value,
@@ -468,6 +470,7 @@ function createSectionContent(section) {
   o.default = "0";
   o.depends("connection_type", "proxy");
   o.depends("connection_type", "full_proxy");
+  o.depends("connection_type", "full_proxy_bypass_ru");
   o.rmempty = false;
 
   o = section.option(
@@ -847,6 +850,7 @@ function createSectionContent(section) {
   o.rmempty = false;
   o.depends("connection_type", "proxy");
   o.depends("connection_type", "full_proxy");
+  o.depends("connection_type", "full_proxy_bypass_ru");
 
   o = section.option(
     form.Value,
@@ -870,6 +874,7 @@ function createSectionContent(section) {
   o.rmempty = false;
   o.depends("connection_type", "proxy");
   o.depends("connection_type", "full_proxy");
+  o.depends("connection_type", "full_proxy_bypass_ru");
 }
 
 const EntryPoint = {

@@ -38,6 +38,13 @@ export const HarpyNetShellMethods = {
     callBaseMethod<{ clients?: Record<string, string> }>(
       HarpyNet.AvailableMethods.GET_DHCP_CLIENTS,
     ),
+  checkHostAvailability: async (host: string) =>
+    callBaseMethod<{ host: string; available: boolean; code: string; url: string }>(
+      HarpyNet.AvailableMethods.CHECK_HOST_AVAILABILITY,
+      [host],
+      '/usr/bin/harpynet',
+      20000,
+    ),
   getClashApiProxyLatency: async (tag: string) =>
     callBaseMethod<HarpyNet.GetClashApiProxyLatency>(
       HarpyNet.AvailableMethods.CLASH_API,

@@ -26,11 +26,31 @@ export function render() {
           E(
             'button',
             {
+              id: 'logs-tab-fullvpn',
+              class: 'btn cbi-button pdk_logs-page__tab',
+              type: 'button',
+              title: t('Device traffic in Full VPN mode', 'Трафик устройств в режиме Полный VPN'),
+            },
+            `${t('Full VPN', 'Полный VPN')} 0`,
+          ),
+          E(
+            'button',
+            {
               id: 'logs-tab-direct',
               class: 'btn cbi-button pdk_logs-page__tab',
               type: 'button',
             },
             `${t('Without VPN', 'Без VPN')} 0`,
+          ),
+          E(
+            'button',
+            {
+              id: 'logs-tab-failure',
+              class: 'btn cbi-button pdk_logs-page__tab',
+              type: 'button',
+              title: t('Failure candidates', 'Кандидаты для сбоя'),
+            },
+            `${t('Failure', 'Сбой')} 0`,
           ),
           E(
             'button',

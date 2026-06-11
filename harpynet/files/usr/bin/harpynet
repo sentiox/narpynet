@@ -103,7 +103,29 @@ has_outbound_section() {
     return $section_exists
 }
 
+wait_for_start_lock() {
+    local lock_dir="/var/run/harpynet-start.lock"
+    local timeout="${1:-45}"
+    local waited=0
+
+    while [ -d "$lock_dir" ] && [ "$waited" -lt "$timeout" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    [ ! -d "$lock_dir" ]
+}
+
 start_main() {
+    local lock_dir="/var/run/harpynet-start.lock"
+
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        log "HarpyNet start is already running, waiting for it to finish" "warn"
+        wait_for_start_lock 60
+        return 0
+    fi
+    trap "rmdir '$lock_dir' 2>/dev/null" EXIT INT TERM
+
     log "Starting harpynet"
 
     check_requirements
@@ -139,10 +161,17 @@ start_main() {
     # can finish as soon as the service restart has completed.
     list_update >/dev/null 2>&1 &
     echo $! > /var/run/harpynet_list_update.pid
+
+    rmdir "$lock_dir" 2>/dev/null
+    trap - EXIT INT TERM
 }
 
 stop_main() {
     log "Stopping the harpynet"
+
+    if ! wait_for_start_lock 60; then
+        log "HarpyNet start lock is still active, continuing stop" "warn"
+    fi
 
     if [ -f /var/run/harpynet_list_update.pid ]; then
         pid=$(cat /var/run/harpynet_list_update.pid)
@@ -350,6 +379,10 @@ create_nft_rules() {
     nft add rule inet "$NFT_TABLE_NAME" mangle_output ip daddr "@$NFT_COMMON_SET_NAME" meta l4proto udp meta mark set "$NFT_FAKEIP_MARK" counter
     nft add rule inet "$NFT_TABLE_NAME" mangle_output ip daddr "$SB_FAKEIP_INET4_RANGE" meta l4proto tcp meta mark set "$NFT_FAKEIP_MARK" counter
     nft add rule inet "$NFT_TABLE_NAME" mangle_output ip daddr "$SB_FAKEIP_INET4_RANGE" meta l4proto udp meta mark set "$NFT_FAKEIP_MARK" counter
+
+    config_foreach nft_include_full_proxy_section_handler "section"
+    config_foreach nft_include_full_proxy_bypass_ru_source_ips_handler "section"
+    config_foreach nft_include_source_ips_in_routing_handler "section"
 
     local exclude_ntp
     config_get_bool exclude_ntp "settings" "exclude_ntp" "0"
@@ -970,7 +1003,7 @@ configure_outbound_handler() {
     local connection_type
     config_get connection_type "$section" "connection_type"
     case "$connection_type" in
-    proxy)
+    proxy | full_proxy | full_proxy_bypass_ru)
         log "Configuring subscription outbound for the $section section"
         local subscription_url subscription_proxy_links udp_over_tcp i outbound_tag outbound_tags \
             default_outbound selector_tag selector_outbounds
@@ -1093,9 +1126,83 @@ sing_box_configure_route() {
         config_list_foreach "settings" "routing_excluded_ips" exclude_source_ip_from_routing_handler "$rule_tag"
     fi
 
+    config_foreach configure_full_proxy_bypass_ru_route_rule "section"
+
+    config_foreach include_full_proxy_section_in_routing_handler "section"
+
+    config_foreach include_full_proxy_bypass_ru_source_ips_in_routing_handler "section"
+
     config_foreach include_source_ips_in_routing_handler "section"
 
     config_foreach configure_routing_for_section_lists "section"
+}
+
+include_full_proxy_section_in_routing_handler() {
+    local section="$1"
+    local connection_type rule_tag
+
+    config_get connection_type "$section" "connection_type"
+    case "$connection_type" in
+    full_proxy | full_proxy_bypass_ru) ;;
+    *) return 0 ;;
+    esac
+
+    log "Full VPN mode enabled for '$section' section" "info"
+    rule_tag="$(gen_id)"
+    config=$(sing_box_cm_add_route_rule "$config" "$rule_tag" "$SB_TPROXY_INBOUND_TAG" "$(get_outbound_tag_by_section "$section")")
+}
+
+configure_full_proxy_bypass_ru_route_rule() {
+    local section="$1"
+    local connection_type
+
+    config_get connection_type "$section" "connection_type"
+    [ "$connection_type" = "full_proxy_bypass_ru" ] || return 0
+
+    log "Full VPN bypass Russia mode enabled for '$section' section" "info"
+
+    local rule_tag ruleset_tag format url update_interval detour ru_domains
+    rule_tag="$(gen_id)"
+    ruleset_tag="$(get_ruleset_tag "$section" "russia_outside" "bypass")"
+    format="binary"
+    url="$SRS_MAIN_URL/russia_outside.srs"
+    detour="$(get_download_detour_tag)"
+    config_get update_interval "settings" "update_interval" "1d"
+    ru_domains='["ru","su","рф","рус","moscow","москва","xn--p1ai","xn--p1acf","xn--80adxhks"]'
+
+    config=$(sing_box_cm_add_route_rule "$config" "$rule_tag" "$SB_TPROXY_INBOUND_TAG" "$SB_DIRECT_OUTBOUND_TAG")
+    config=$(sing_box_cm_add_remote_ruleset "$config" "$ruleset_tag" "$format" "$url" "$detour" "$update_interval")
+    config=$(sing_box_cm_patch_route_rule "$config" "$rule_tag" "rule_set" "$ruleset_tag")
+    config=$(sing_box_cm_patch_route_rule "$config" "$rule_tag" "domain_suffix" "$ru_domains")
+    config=$(sing_box_cm_patch_dns_route_rule "$config" "$SB_FAKEIP_DNS_RULE_TAG" "rule_set" "$ruleset_tag")
+    config=$(sing_box_cm_patch_dns_route_rule "$config" "$SB_FAKEIP_DNS_RULE_TAG" "domain_suffix" "$ru_domains")
+}
+
+include_full_proxy_bypass_ru_source_ips_in_routing_handler() {
+    local section="$1"
+
+    local bypass_ru_routed_ips
+    config_get bypass_ru_routed_ips "$section" "bypass_ru_routed_ips"
+    [ -n "$bypass_ru_routed_ips" ] || return 0
+
+    local direct_rule_tag proxy_rule_tag ruleset_tag format url update_interval detour ru_domains
+    direct_rule_tag="$(gen_id)"
+    proxy_rule_tag="$(gen_id)"
+    ruleset_tag="$(get_ruleset_tag "$section" "russia_outside" "device-bypass")"
+    format="binary"
+    url="$SRS_MAIN_URL/russia_outside.srs"
+    detour="$(get_download_detour_tag)"
+    config_get update_interval "settings" "update_interval" "1d"
+    ru_domains='["ru","su","рф","рус","moscow","москва","xn--p1ai","xn--p1acf","xn--80adxhks"]'
+
+    config=$(sing_box_cm_add_route_rule "$config" "$direct_rule_tag" "$SB_TPROXY_INBOUND_TAG" "$SB_DIRECT_OUTBOUND_TAG")
+    config=$(sing_box_cm_add_remote_ruleset "$config" "$ruleset_tag" "$format" "$url" "$detour" "$update_interval")
+    config=$(sing_box_cm_patch_route_rule "$config" "$direct_rule_tag" "rule_set" "$ruleset_tag")
+    config=$(sing_box_cm_patch_route_rule "$config" "$direct_rule_tag" "domain_suffix" "$ru_domains")
+    config_list_foreach "$section" "bypass_ru_routed_ips" include_source_ip_in_routing_handler "$direct_rule_tag"
+
+    config=$(sing_box_cm_add_route_rule "$config" "$proxy_rule_tag" "$SB_TPROXY_INBOUND_TAG" "$(get_outbound_tag_by_section "$section")")
+    config_list_foreach "$section" "bypass_ru_routed_ips" include_source_ip_in_routing_handler "$proxy_rule_tag"
 }
 
 include_source_ips_in_routing_handler() {
@@ -1137,7 +1244,6 @@ configure_common_direct_route_rule() {
 include_source_ip_in_routing_handler() {
     local source_ip="$1"
     local rule_tag="$2"
-    nft_list_all_traffic_from_ip "$source_ip"
     config=$(sing_box_cm_patch_route_rule "$config" "$rule_tag" "source_ip_cidr" "$source_ip")
 }
 
@@ -1170,7 +1276,7 @@ configure_routing_for_section_lists() {
     config_get_bool resolve_real_ip_for_routing "$section" "resolve_real_ip_for_routing" 0
 
     case "$section_connection_type" in
-    proxy)
+    proxy | full_proxy | full_proxy_bypass_ru)
         route_rule_tag="$(gen_id)"
         outbound_tag=$(get_outbound_tag_by_section "$section")
         config=$(sing_box_cm_add_route_rule "$config" "$route_rule_tag" "$SB_TPROXY_INBOUND_TAG" "$outbound_tag")
@@ -1773,7 +1879,7 @@ _determine_first_outbound_section() {
     local connection_type
     config_get connection_type "$section" "connection_type"
 
-    if [ "$connection_type" = "proxy" ]; then
+    if [ "$connection_type" = "proxy" ] || [ "$connection_type" = "full_proxy" ] || [ "$connection_type" = "full_proxy_bypass_ru" ]; then
         [ -z "$first_section" ] && first_section="$1"
     fi
 }
@@ -1850,6 +1956,39 @@ get_service_listen_address() {
 }
 
 ## nftables
+nft_include_full_proxy_section_handler() {
+    local section="$1"
+    local connection_type
+
+    config_get connection_type "$section" "connection_type"
+    case "$connection_type" in
+    full_proxy | full_proxy_bypass_ru) ;;
+    *) return 0 ;;
+    esac
+
+    nft_list_all_external_traffic
+}
+
+nft_include_source_ips_in_routing_handler() {
+    local section="$1"
+    local fully_routed_ips
+
+    config_get fully_routed_ips "$section" "fully_routed_ips"
+    [ -n "$fully_routed_ips" ] || return 0
+
+    config_list_foreach "$section" "fully_routed_ips" nft_list_all_traffic_from_ip
+}
+
+nft_include_full_proxy_bypass_ru_source_ips_handler() {
+    local section="$1"
+    local bypass_ru_routed_ips
+
+    config_get bypass_ru_routed_ips "$section" "bypass_ru_routed_ips"
+    [ -n "$bypass_ru_routed_ips" ] || return 0
+
+    config_list_foreach "$section" "bypass_ru_routed_ips" nft_list_all_traffic_from_ip
+}
+
 nft_list_all_traffic_from_ip() {
     local ip="$1"
 
@@ -1859,6 +1998,17 @@ nft_list_all_traffic_from_ip() {
         nft insert rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" ip saddr "$ip" \
             meta l4proto udp meta mark set "$NFT_FAKEIP_MARK" counter
         nft insert rule inet "$NFT_TABLE_NAME" mangle ip saddr "$ip" ip daddr @localv4 return
+    fi
+}
+
+nft_list_all_external_traffic() {
+    if ! nft list chain inet "$NFT_TABLE_NAME" mangle | grep -q "harpynet-full-vpn"; then
+        nft insert rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" \
+            meta l4proto udp meta mark set "$NFT_FAKEIP_MARK" counter comment \"harpynet-full-vpn-udp\"
+        nft insert rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" \
+            meta l4proto tcp meta mark set "$NFT_FAKEIP_MARK" counter comment \"harpynet-full-vpn-tcp\"
+        nft insert rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" ip daddr "@$NFT_LOCALV4_SET_NAME" \
+            return comment \"harpynet-full-vpn-local\"
     fi
 }
 
@@ -3230,32 +3380,274 @@ get_direct_connections() {
 }
 
 get_dhcp_clients() {
-    awk '
-        FILENAME == "/tmp/dhcp.leases" {
-            if ($3 != "" && $4 != "" && $4 != "*")
-                print $3 "\t" $4
-            next
-        }
+    local wifi_map bridge_map lease_rows hosts_rows
+    wifi_map="$(mktemp)"
+    bridge_map="$(mktemp)"
+    lease_rows="$(mktemp)"
+    hosts_rows="$(mktemp)"
 
+    if command -v iwinfo >/dev/null 2>&1; then
+        wifi status 2>/dev/null | jq -r '
+            to_entries[] as $radio |
+            ($radio.value.config.band // "wifi") as $band |
+            $radio.value.interfaces[]? |
+            select(.ifname != null) |
+            [.ifname, $band, (.config.ssid // "Wi-Fi")] | @tsv
+        ' 2>/dev/null | while IFS="$(printf '\t')" read -r ifname band ssid; do
+            [ -n "$ifname" ] || continue
+            iwinfo "$ifname" assoclist 2>/dev/null | awk -v band="$band" -v ifname="$ifname" -v ssid="$ssid" '
+                /^[0-9A-Fa-f][0-9A-Fa-f]:/ {
+                    mac=tolower($1)
+                    label = "Wi-Fi"
+                    if (band == "2g") label = "Wi-Fi 2.4"
+                    else if (band == "5g") label = "Wi-Fi 5G"
+                    print mac "\t" label "\t" ifname "\t" ssid
+                }
+            '
+        done > "$wifi_map"
+    fi
+
+    if command -v brctl >/dev/null 2>&1; then
+        brctl showstp br-lan 2>/dev/null | awk '
+            /^[^[:space:]].*\([0-9]+\)/ {
+                ifname=$1
+                port=$2
+                gsub(/[()]/, "", port)
+                if (ifname != "" && port != "") print port "\t" ifname
+            }
+        ' | awk -F '\t' '
+            FILENAME == "-" {
+                port_if[$1]=$2
+                next
+            }
+        ' - >/dev/null 2>&1
+
+        brctl showstp br-lan 2>/dev/null | awk '
+            /^[^[:space:]].*\([0-9]+\)/ {
+                ifname=$1
+                port=$2
+                gsub(/[()]/, "", port)
+                if (ifname != "" && port != "") print port "\t" ifname
+            }
+        ' > "$bridge_map.ports"
+
+        brctl showmacs br-lan 2>/dev/null | awk 'NR > 1 { print $1 "\t" tolower($2) }' | awk -F '\t' '
+            FILENAME == ARGV[1] {
+                port_if[$1]=$2
+                next
+            }
+            FILENAME == ARGV[2] {
+                port=$1
+                mac=$2
+                ifname=port_if[port]
+                label=""
+                if (ifname ~ /^phy0-/) label="Wi-Fi 2.4"
+                else if (ifname ~ /^phy1-/) label="Wi-Fi 5G"
+                else if (ifname ~ /^phy/) label="Wi-Fi"
+                else if (ifname != "") label="LAN " port
+                if (mac != "" && label != "") print mac "\t" label "\t" ifname "\t"
+            }
+        ' "$bridge_map.ports" - >> "$bridge_map"
+
+        rm -f "$bridge_map.ports"
+    fi
+
+    awk '
+        {
+            mac=tolower($2)
+            ip=$3
+            name=$4
+            if (ip != "" && mac != "") {
+                if (name == "" || name == "*") name = "Неизвестное устройство"
+                print ip "\t" name "\t" mac
+            }
+        }
+    ' /tmp/dhcp.leases 2>/dev/null > "$lease_rows"
+
+    awk '
         NF >= 2 && $1 !~ /^#/ {
             if ($1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 != "" && $2 != "*")
                 print $1 "\t" $2
         }
-    ' /tmp/dhcp.leases /tmp/hosts/dhcp.* 2>/dev/null | jq -Rn '
+    ' /tmp/hosts/dhcp.* 2>/dev/null > "$hosts_rows"
+
+    awk -F '\t' '
+        FILENAME == ARGV[1] {
+            wifi[$1] = $2
+            wifi_if[$1] = $3
+            wifi_ssid[$1] = $4
+            next
+        }
+        FILENAME == ARGV[2] {
+            bridge[$1] = $2
+            bridge_if[$1] = $3
+            next
+        }
+        FILENAME == ARGV[3] {
+            ip=$1; name=$2; mac=$3
+            host_by_ip[ip]=name
+            mac_by_ip[ip]=mac
+            next
+        }
+        FILENAME == ARGV[4] {
+            if (!($1 in host_by_ip)) {
+                host_by_ip[$1]=$2
+                mac_by_ip[$1]=""
+            } else if (host_by_ip[$1] == "Неизвестное устройство") {
+                host_by_ip[$1]=$2
+            }
+            next
+        }
+        END {
+            for (ip in host_by_ip) {
+                name=host_by_ip[ip]
+                mac=mac_by_ip[ip]
+                connection="Не определено"
+                ifname=""
+                ssid=""
+                if (mac != "" && mac in wifi) {
+                    connection=wifi[mac]
+                    ifname=wifi_if[mac]
+                    ssid=wifi_ssid[mac]
+                } else if (mac != "" && mac in bridge) {
+                    connection=bridge[mac]
+                    ifname=bridge_if[mac]
+                } else if (tolower(name) ~ /(honor|redmi|iphone|galaxy|samsung|xiaomi|poco|realme|pixel|phone|android|tv|salute|smarttv|chromecast)/) {
+                    connection="Wi-Fi / не активно"
+                }
+                if (ip ~ /\.1$/ && name == "OpenWrt") connection="Router"
+                print ip "\t" name "\t" mac "\t" connection "\t" ifname "\t" ssid
+            }
+        }
+    ' "$wifi_map" "$bridge_map" "$lease_rows" "$hosts_rows" | sort -V | jq -Rn '
         {
-            clients: (
-                reduce inputs as $line (
-                    {};
-                    ($line | split("\t")) as $item |
-                    if ($item[0] and $item[1]) then
-                        .[$item[0]] = $item[1]
-                    else
-                        .
-                    end
-                )
+            clients: {},
+            devices: [
+                inputs |
+                split("\t") |
+                {
+                    ip: .[0],
+                    name: .[1],
+                    mac: .[2],
+                    connection: .[3],
+                    interface: .[4],
+                    ssid: .[5]
+                }
+            ]
+        } |
+        .clients = (
+            reduce .devices[] as $device (
+                {};
+                .[$device.ip] = $device.name
             )
+        )
+    '
+
+    rm -f "$wifi_map" "$bridge_map" "$bridge_map.ports" "$lease_rows" "$hosts_rows"
+}
+
+check_host_availability() {
+    local host="$1"
+    local code="000"
+    local raw_code=""
+    local header=""
+    local url=""
+
+    if ! printf '%s' "$host" | grep -Eq '^[A-Za-z0-9.-]+$'; then
+        jq -n --arg host "$host" '{host:$host,available:false,code:"invalid",url:""}'
+        return 0
+    fi
+
+    for scheme in https http; do
+        url="${scheme}://${host}/"
+        header="$(curl -4 -k -L -s -I \
+            -A 'Mozilla/5.0' \
+            --connect-timeout 3 --max-time 6 "$url" 2>/dev/null)"
+        code="$(printf '%s' "$header" | sed -n 's/^HTTP\/[^ ]* \([0-9][0-9][0-9]\).*/\1/p' | tail -n 1)"
+        if [ -z "$code" ] || [ "$code" = "405" ]; then
+            raw_code="$(curl -4 -k -L -s -o /dev/null -w '%{http_code}' \
+                -A 'Mozilla/5.0' \
+                --connect-timeout 3 --max-time 6 "$url" 2>/dev/null || true)"
+            code="$(printf '%s' "$raw_code" | grep -Eo '[0-9]{3}' | tail -n 1)"
+        fi
+        code="${code:-000}"
+
+        if [ "$code" != "000" ]; then
+            break
+        fi
+    done
+
+    jq -n \
+        --arg host "$host" \
+        --arg code "$code" \
+        --arg url "$url" \
+        --argjson available "$([ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 500 ] 2>/dev/null && echo true || echo false)" \
+        '{host:$host,available:$available,code:$code,url:$url}'
+}
+
+get_first_proxy_section_name() {
+    uci -q show harpynet | awk -F '[.=]' '
+        $3 == "connection_type" && ($0 ~ /='\''proxy'\''$/ || $0 ~ /='\''full_proxy'\''$/ || $0 ~ /='\''full_proxy_bypass_ru'\''$/) {
+            print $2
+            exit
         }
     '
+}
+
+delete_device_route_from_all_sections() {
+    local ip="$1"
+    local section
+
+    for section in $(uci -q show harpynet | awk -F '[.=]' '$3 == "connection_type" { print $2 }'); do
+        uci -q del_list "harpynet.$section.fully_routed_ips=$ip" 2>/dev/null || true
+        uci -q del_list "harpynet.$section.bypass_ru_routed_ips=$ip" 2>/dev/null || true
+    done
+}
+
+set_device_route() {
+    local ip="$1"
+    local mode="$2"
+    local proxy_section
+
+    if ! printf '%s' "$ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+        jq -n --arg ip "$ip" '{success:false,error:"invalid_ip",ip:$ip}'
+        return 1
+    fi
+
+    delete_device_route_from_all_sections "$ip"
+    uci -q del_list "harpynet.settings.routing_excluded_ips=$ip" 2>/dev/null || true
+
+    case "$mode" in
+    proxy | full_proxy)
+        proxy_section="$(get_first_proxy_section_name)"
+        if [ -z "$proxy_section" ]; then
+            jq -n --arg ip "$ip" '{success:false,error:"proxy_section_not_found",ip:$ip}'
+            return 1
+        fi
+        uci add_list "harpynet.$proxy_section.fully_routed_ips=$ip"
+        ;;
+    full_proxy_bypass_ru)
+        proxy_section="$(get_first_proxy_section_name)"
+        if [ -z "$proxy_section" ]; then
+            jq -n --arg ip "$ip" '{success:false,error:"proxy_section_not_found",ip:$ip}'
+            return 1
+        fi
+        uci add_list "harpynet.$proxy_section.bypass_ru_routed_ips=$ip"
+        ;;
+    exclude)
+        uci add_list "harpynet.settings.routing_excluded_ips=$ip"
+        ;;
+    default)
+        ;;
+    *)
+        jq -n --arg mode "$mode" '{success:false,error:"invalid_mode",mode:$mode}'
+        return 1
+        ;;
+    esac
+
+    uci commit harpynet
+
+    jq -n --arg ip "$ip" --arg mode "$mode" '{success:true,ip:$ip,mode:$mode}'
 }
 
 show_help() {
@@ -3291,6 +3683,7 @@ Available commands:
     get_runtime_stats       Get CPU, memory and temperature statistics
     get_direct_connections  Get active connections routed without VPN
     get_dhcp_clients        Get DHCP client names by IP
+    set_device_route        Set device route mode by IP
     check_dns_available     Check DNS server availability
     global_check            Run global system check
 EOF
@@ -3380,6 +3773,12 @@ get_direct_connections)
     ;;
 get_dhcp_clients)
     get_dhcp_clients
+    ;;
+set_device_route)
+    set_device_route "${2:-}" "${3:-}"
+    ;;
+check_host_availability)
+    check_host_availability "${2:-}"
     ;;
 check_dns_available)
     check_dns_available

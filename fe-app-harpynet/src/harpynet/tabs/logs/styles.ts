@@ -183,7 +183,7 @@ export const styles = `
 .pdk_logs-page__table th:first-child,
 .pdk_logs-page__table td:first-child {
     text-align: left;
-    width: 24%;
+    width: 20%;
 }
 
 .pdk_logs-page__table th:nth-child(2),
@@ -210,15 +210,110 @@ export const styles = `
 
 .pdk_logs-page__table th:nth-child(7),
 .pdk_logs-page__table td:nth-child(7) {
-    width: 108px;
+    width: 170px;
+    text-align: left;
 }
 
 .pdk_logs-page__table th:nth-child(8),
 .pdk_logs-page__table td:nth-child(8) {
+    width: 108px;
+}
+
+.pdk_logs-page__table th:nth-child(9),
+.pdk_logs-page__table td:nth-child(9) {
     width: 44px;
 }
 
 .pdk_logs-page__route {
+    font-weight: 700;
+}
+
+.harpynet-route-fullvpn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.harpynet-route-fullvpn__label {
+    color: var(--success-color-medium, #00a86b);
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.pdk_logs-page__host-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.pdk_logs-page__host-value {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pdk_logs-page .btn.pdk_logs-page__copy-host {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
+    padding: 0 !important;
+    opacity: 0.7;
+}
+
+.pdk_logs-page .btn.pdk_logs-page__copy-host:hover {
+    opacity: 1;
+}
+
+.pdk_logs-page__copy-host svg {
+    width: 14px;
+    height: 14px;
+}
+
+.pdk_logs-page__service-cell {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    max-width: 170px;
+    line-height: 1.32;
+    text-align: left;
+    align-items: flex-start;
+}
+
+.pdk_logs-page__service-name,
+.pdk_logs-page__service-reason {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pdk_logs-page__service-name {
+    color: var(--pdk-logs-success-color);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.pdk_logs-page__service-reason {
+    color: var(--text-color-medium, #aeb7c2);
+    font-size: 12px;
+    font-weight: 500;
+    max-width: 100%;
+    white-space: normal;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.pdk_logs-page__service-cell--failed .pdk_logs-page__service-name,
+.pdk_logs-page__service-cell--failed .pdk_logs-page__service-reason {
+    color: var(--pdk-logs-danger-color);
     font-weight: 700;
 }
 
@@ -366,13 +461,28 @@ export const styles = `
     .pdk_logs-page__table td:nth-child(5),
     .pdk_logs-page__table td:nth-child(6),
     .pdk_logs-page__table td:nth-child(7),
-    .pdk_logs-page__table td:nth-child(8) {
+    .pdk_logs-page__table td:nth-child(8),
+    .pdk_logs-page__table td:nth-child(9) {
         grid-column: 1 / -1;
     }
 
     .pdk_logs-page__table td:first-child,
     .pdk_logs-page__table td:first-child::before {
         text-align: left;
+    }
+
+    .pdk_logs-page__host-cell {
+        justify-content: space-between;
+    }
+
+    .pdk_logs-page__service-cell {
+        max-width: 100%;
+        align-items: flex-end;
+        text-align: right;
+    }
+
+    .pdk_logs-page__host-value {
+        text-align: right;
     }
 
     .pdk_logs-page__table td > *:last-child {

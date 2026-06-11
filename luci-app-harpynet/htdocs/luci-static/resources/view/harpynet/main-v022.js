@@ -5485,6 +5485,16 @@ function render3() {
           E(
             "button",
             {
+              id: "logs-tab-fullvpn",
+              class: "btn cbi-button pdk_logs-page__tab",
+              type: "button",
+              title: logsTranslate("Device traffic in Full VPN mode", "\u0422\u0440\u0430\u0444\u0438\u043A \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432 \u0432 \u0440\u0435\u0436\u0438\u043C\u0435 \u041F\u043E\u043B\u043D\u044B\u0439 VPN")
+            },
+            `${logsTranslate("Full VPN", "\u041F\u043E\u043B\u043D\u044B\u0439 VPN")} 0`
+          ),
+          E(
+            "button",
+            {
               id: "logs-tab-direct",
               class: "btn cbi-button pdk_logs-page__tab",
               type: "button"
@@ -5590,11 +5600,14 @@ var activeConnections = /* @__PURE__ */ new Map();
 var closedConnections = /* @__PURE__ */ new Map();
 var routeNames = /* @__PURE__ */ new Map();
 var deviceNames = /* @__PURE__ */ new Map();
+var fullVpnSourceIps = /* @__PURE__ */ new Set();
+var fullVpnBypassRuSourceIps = /* @__PURE__ */ new Set();
 var hostChecks = /* @__PURE__ */ new Map();
 var pendingHostChecks = /* @__PURE__ */ new Set();
 var sourceViewModeStorageKey = "harpynet.logs.sourceViewMode";
 var routeNamesPromise;
 var deviceNamesPromise;
+var fullVpnSourceIpsPromise;
 var activeTab = "active";
 var sourceViewMode = localStorage.getItem(sourceViewModeStorageKey) === "name" ? "name" : "ip";
 var searchQuery = "";
@@ -5616,16 +5629,86 @@ function getRoute(connection) {
   const route = connection.chains?.[0] || connection.rule || "harpynet";
   return routeNames.get(route) || route;
 }
+function ipv4ToNumber(ip) {
+  const parts = ip.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return null;
+  }
+  return parts.reduce((sum, part) => (sum << 8) + part, 0) >>> 0;
+}
+function matchesIpv4Cidr(ip, cidr) {
+  const [network, maskRaw] = cidr.split("/");
+  const maskBits = Number(maskRaw);
+  const ipNumber = ipv4ToNumber(ip);
+  const networkNumber = ipv4ToNumber(network);
+  if (ipNumber === null || networkNumber === null || !Number.isInteger(maskBits) || maskBits < 0 || maskBits > 32) {
+    return false;
+  }
+  const mask = maskBits === 0 ? 0 : 4294967295 << 32 - maskBits >>> 0;
+  return (ipNumber & mask) === (networkNumber & mask);
+}
+function sourceMatchesIpSet(connection, ipSet) {
+  const sourceIP = connection.metadata?.sourceIP || "";
+  if (!sourceIP) {
+    return false;
+  }
+  if (ipSet.has(sourceIP)) {
+    return true;
+  }
+  return Array.from(ipSet).some((entry) => entry.includes("/") && matchesIpv4Cidr(sourceIP, entry));
+}
+function isFullVpnSource(connection) {
+  if (connection.direct) {
+    return false;
+  }
+  return sourceMatchesIpSet(connection, fullVpnSourceIps);
+}
+function isFullVpnBypassRuSource(connection) {
+  if (connection.direct) {
+    return false;
+  }
+  return sourceMatchesIpSet(connection, fullVpnBypassRuSourceIps);
+}
+function isFullVpnLogConnection(connection) {
+  return isFullVpnSource(connection) || isFullVpnBypassRuSource(connection);
+}
+function isFullVpnSourceIp(connection) {
+  return sourceMatchesIpSet(connection, fullVpnSourceIps) || sourceMatchesIpSet(connection, fullVpnBypassRuSourceIps);
+}
+function isProxyLogConnection(connection) {
+  return !connection.direct && !isFullVpnLogConnection(connection);
+}
 function renderRoute(connection) {
   const route = getRoute(connection);
   if (connection.direct) {
     return E("span", { class: "harpynet-route-direct" }, route);
   }
   const country = inferCountryCode2(route);
-  return E("span", { class: "harpynet-route-with-flag" }, [
+  const routeNode = E("span", { class: "harpynet-route-with-flag" }, [
     renderCountryFlag(country, route),
     E("span", {}, stripCountryPrefix(route, country))
   ].filter(Boolean));
+  if (isFullVpnSource(connection)) {
+    return E("span", {
+      class: "harpynet-route-fullvpn",
+      title: `${logsTranslate("Full VPN", "\u041F\u043E\u043B\u043D\u044B\u0439 VPN")}
+${route}`
+    }, [
+      E("span", { class: "harpynet-route-fullvpn__label" }, logsTranslate("Full VPN", "\u041F\u043E\u043B\u043D\u044B\u0439 VPN")),
+      renderCountryFlag(country, route)
+    ]);
+  }
+  if (isFullVpnBypassRuSource(connection)) {
+    return E("span", {
+      class: "harpynet-route-fullvpn",
+      title: `${logsTranslate("Full VPN without Russia", "Полный VPN без РФ")}
+${route}`
+    }, [
+      E("span", { class: "harpynet-route-fullvpn__label" }, logsTranslate("Full VPN without Russia", "Полный VPN без РФ")),
+      renderCountryFlag(country, route)
+    ]);
+  }
+  return routeNode;
 }
 function getProxyName(link) {
   const hashIndex = link.indexOf("#");
@@ -5662,6 +5745,40 @@ function ensureRouteNames() {
     routeNamesPromise = void 0;
   }));
   return routeNamesPromise;
+}
+async function loadFullVpnSourceIps() {
+  const sections = await CustomHarpyNetMethods.getConfigSections();
+  fullVpnSourceIps.clear();
+  fullVpnBypassRuSourceIps.clear();
+  for (const section of sections) {
+    if (section[".type"] !== "section") {
+      continue;
+    }
+    const ips = Array.isArray(section.fully_routed_ips) ? section.fully_routed_ips : section.fully_routed_ips ? [section.fully_routed_ips] : [];
+    for (const ip of ips) {
+      if (ip) {
+        fullVpnSourceIps.add(ip);
+      }
+    }
+    const bypassRuIps = Array.isArray(section.bypass_ru_routed_ips) ? section.bypass_ru_routed_ips : section.bypass_ru_routed_ips ? [section.bypass_ru_routed_ips] : [];
+    for (const ip of bypassRuIps) {
+      if (ip) {
+        fullVpnBypassRuSourceIps.add(ip);
+      }
+    }
+  }
+}
+function ensureFullVpnSourceIps() {
+  fullVpnSourceIpsPromise ?? (fullVpnSourceIpsPromise = loadFullVpnSourceIps().then(() => {
+    if (mounted) {
+      renderConnections();
+    }
+  }).catch((error) => {
+    logger.error("[LOGS]", "loadFullVpnSourceIps failed", error);
+  }).finally(() => {
+    fullVpnSourceIpsPromise = void 0;
+  }));
+  return fullVpnSourceIpsPromise;
 }
 function getSource(connection) {
   const sourceIP = connection.metadata?.sourceIP || "";
@@ -5864,6 +5981,8 @@ function getServiceInsight(connection) {
   const rule = getServiceRule(host);
   const name = rule?.name || (isIpAddress(host) ? logsTranslate("Unknown IP", "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u0439 IP") : logsTranslate("Unknown", "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u043E"));
   const route = getRoute(connection);
+  const fullVpnRoute = isFullVpnSource(connection);
+  const fullVpnBypassRuRoute = isFullVpnBypassRuSource(connection);
   const reasons = [
     rule ? getServiceRuleReason(rule) : isIpAddress(host) ? logsTranslate("Domain is not visible", "\u0414\u043E\u043C\u0435\u043D \u043D\u0435 \u0432\u0438\u0434\u0435\u043D") : logsTranslate("No known service rule matched", "\u0421\u0435\u0440\u0432\u0438\u0441 \u043D\u0435 \u0440\u0430\u0441\u043F\u043E\u0437\u043D\u0430\u043D")
   ];
@@ -5877,7 +5996,7 @@ function getServiceInsight(connection) {
   } else if (type && port) {
     reasons.push(`${type.toUpperCase()} ${port}`);
   }
-  reasons.push(connection.direct ? logsTranslate("Route: without VPN", "\u041C\u0430\u0440\u0448\u0440\u0443\u0442: \u0431\u0435\u0437 VPN") : `${logsTranslate("Route", "\u041C\u0430\u0440\u0448\u0440\u0443\u0442")}: ${route}`);
+  reasons.push(connection.direct ? logsTranslate("Route: without VPN", "\u041C\u0430\u0440\u0448\u0440\u0443\u0442: \u0431\u0435\u0437 VPN") : fullVpnBypassRuRoute ? `${logsTranslate("Route", "\u041C\u0430\u0440\u0448\u0440\u0443\u0442")}: ${logsTranslate("Full VPN without Russia", "Полный VPN без РФ")} (${route})` : fullVpnRoute ? `${logsTranslate("Route", "\u041C\u0430\u0440\u0448\u0440\u0443\u0442")}: ${logsTranslate("Full VPN", "\u041F\u043E\u043B\u043D\u044B\u0439 VPN")} (${route})` : `${logsTranslate("Route", "\u041C\u0430\u0440\u0448\u0440\u0443\u0442")}: ${route}`);
   return {
     name,
     reason: failureReason || reasons[0],
@@ -5943,7 +6062,9 @@ function getUniqueFailureConnections(connections) {
 function getVisibleConnections() {
   let source = Array.from(activeConnections.values());
   if (activeTab === "proxy") {
-    source = source.filter((connection) => !connection.direct);
+    source = source.filter((connection) => isProxyLogConnection(connection));
+  } else if (activeTab === "fullvpn") {
+    source = source.filter((connection) => isFullVpnLogConnection(connection));
   } else if (activeTab === "direct") {
     source = source.filter((connection) => connection.direct);
   } else if (activeTab === "failure") {
@@ -5962,6 +6083,7 @@ function setButtonActive(button, value) {
 function updateControls() {
   const activeButton = document.getElementById("logs-tab-active");
   const proxyButton = document.getElementById("logs-tab-proxy");
+  const fullVpnButton = document.getElementById("logs-tab-fullvpn");
   const directButton = document.getElementById("logs-tab-direct");
   const failureButton = document.getElementById("logs-tab-failure");
   const closedButton = document.getElementById("logs-tab-closed");
@@ -5970,6 +6092,15 @@ function updateControls() {
   );
   const pauseButton = document.getElementById("logs-pause-toggle");
   const sourceToggle = document.getElementById("logs-source-toggle");
+  const proxyConnectionsCount = Array.from(activeConnections.values()).filter(
+    (connection) => isProxyLogConnection(connection)
+  ).length;
+  const fullVpnConnections = Array.from(activeConnections.values()).filter(
+    (connection) => isFullVpnLogConnection(connection)
+  ).length;
+  const directConnectionsCount = Array.from(activeConnections.values()).filter(
+    (connection) => connection.direct
+  ).length;
   const closableConnections = Array.from(activeConnections.values()).filter(
     (connection) => !connection.direct
   ).length;
@@ -5977,10 +6108,14 @@ function updateControls() {
     activeButton.textContent = `${logsTranslate("Active", "\u0420\u0452\u0420\u0454\u0421\u201A\u0420\u0451\u0420\u0406\u0420\u0405\u0421\u2039\u0420\xB5")} ${activeConnections.size}`;
   }
   if (proxyButton) {
-    proxyButton.textContent = `${logsTranslate("Proxy", "\u041F\u0440\u043E\u043A\u0441\u0438")} ${closableConnections}`;
+    proxyButton.textContent = `${logsTranslate("Proxy", "\u041F\u0440\u043E\u043A\u0441\u0438")} ${proxyConnectionsCount}`;
   }
   if (directButton) {
-    directButton.textContent = `${logsTranslate("Without VPN", "\u0411\u0435\u0437 VPN")} ${activeConnections.size - closableConnections}`;
+    directButton.textContent = `${logsTranslate("Without VPN", "\u0411\u0435\u0437 VPN")} ${directConnectionsCount}`;
+  }
+  if (fullVpnButton) {
+    fullVpnButton.textContent = `${logsTranslate("Full VPN", "\u041F\u043E\u043B\u043D\u044B\u0439 VPN")} ${fullVpnConnections}`;
+    fullVpnButton.title = logsTranslate("Device traffic in Full VPN modes", "Трафик устройств в режимах Полный VPN и Полный VPN без РФ");
   }
   if (failureButton) {
     const failureConnections = getUniqueFailureConnections([
@@ -5998,6 +6133,7 @@ function updateControls() {
   }
   setButtonActive(activeButton, activeTab === "active");
   setButtonActive(proxyButton, activeTab === "proxy");
+  setButtonActive(fullVpnButton, activeTab === "fullvpn");
   setButtonActive(directButton, activeTab === "direct");
   setButtonActive(failureButton, activeTab === "failure");
   setButtonActive(closedButton, activeTab === "closed");
@@ -6098,7 +6234,7 @@ function renderConnections() {
   if (!rows.length) {
     container.replaceChildren(
       renderState(
-        activeTab === "active" ? logsTranslate("No active connections", "\u0420\u045C\u0420\xB5\u0421\u201A \u0420\xB0\u0420\u0454\u0421\u201A\u0420\u0451\u0420\u0406\u0420\u0405\u0421\u2039\u0421\u2026 \u0421\u0403\u0420\u0455\u0420\xB5\u0420\u0491\u0420\u0451\u0420\u0405\u0420\xB5\u0420\u0405\u0420\u0451\u0420\u2116") : activeTab === "proxy" ? logsTranslate("No proxy connections", "\u041D\u0435\u0442 \u043F\u0440\u043E\u043A\u0441\u0438-\u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0439") : activeTab === "direct" ? logsTranslate("No direct connections", "\u041D\u0435\u0442 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0439 \u0431\u0435\u0437 VPN") : activeTab === "failure" ? logsTranslate("No failure candidates", "\u041D\u0435\u0442 \u043A\u0430\u043D\u0434\u0438\u0434\u0430\u0442\u043E\u0432 \u0434\u043B\u044F \u0441\u0431\u043E\u044F") : logsTranslate("No closed connections", "\u0420\u045C\u0420\xB5\u0421\u201A \u0420\xB7\u0420\xB0\u0420\u0454\u0421\u0402\u0421\u2039\u0421\u201A\u0421\u2039\u0421\u2026 \u0421\u0403\u0420\u0455\u0420\xB5\u0420\u0491\u0420\u0451\u0420\u0405\u0420\xB5\u0420\u0405\u0420\u0451\u0420\u2116"),
+        activeTab === "active" ? logsTranslate("No active connections", "\u0420\u045C\u0420\xB5\u0421\u201A \u0420\xB0\u0420\u0454\u0421\u201A\u0420\u0451\u0420\u0406\u0420\u0405\u0421\u2039\u0421\u2026 \u0421\u0403\u0420\u0455\u0420\xB5\u0420\u0491\u0420\u0451\u0420\u0405\u0420\xB5\u0420\u0405\u0420\u0451\u0420\u2116") : activeTab === "proxy" ? logsTranslate("No proxy connections", "\u041D\u0435\u0442 \u043F\u0440\u043E\u043A\u0441\u0438-\u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0439") : activeTab === "fullvpn" ? logsTranslate("No Full VPN connections", "\u041D\u0435\u0442 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0439 \u041F\u043E\u043B\u043D\u044B\u0439 VPN") : activeTab === "direct" ? logsTranslate("No direct connections", "\u041D\u0435\u0442 \u0441\u043E\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0439 \u0431\u0435\u0437 VPN") : activeTab === "failure" ? logsTranslate("No failure candidates", "\u041D\u0435\u0442 \u043A\u0430\u043D\u0434\u0438\u0434\u0430\u0442\u043E\u0432 \u0434\u043B\u044F \u0441\u0431\u043E\u044F") : logsTranslate("No closed connections", "\u0420\u045C\u0420\xB5\u0421\u201A \u0420\xB7\u0420\xB0\u0420\u0454\u0421\u0402\u0421\u2039\u0421\u201A\u0421\u2039\u0421\u2026 \u0421\u0403\u0420\u0455\u0420\xB5\u0420\u0491\u0420\u0451\u0420\u0405\u0420\xB5\u0420\u0405\u0420\u0451\u0420\u2116"),
         "pdk_logs-page__state--empty"
       )
     );
@@ -6143,6 +6279,7 @@ async function fetchConnections() {
   try {
     void ensureRouteNames();
     void ensureDeviceNames();
+    await ensureFullVpnSourceIps();
     const [response, directResponse] = await Promise.all([
       HarpyNetShellMethods.getClashApiConnections(),
       HarpyNetShellMethods.getDirectConnections()
@@ -6157,7 +6294,7 @@ async function fetchConnections() {
       proxyConnections.map((connection) => getConnectionTuple(connection))
     );
     const directConnections = directResponse.success ? (directResponse.data?.connections || []).filter(
-      (connection) => connection.id && !proxyTuples.has(getConnectionTuple(connection))
+      (connection) => connection.id && !proxyTuples.has(getConnectionTuple(connection)) && !isFullVpnSourceIp(connection)
     ).map((connection) => ({
       ...connection,
       start: activeConnections.get(connection.id)?.start || (/* @__PURE__ */ new Date()).toISOString()
@@ -6212,6 +6349,10 @@ function bindEvents() {
   });
   document.getElementById("logs-tab-proxy")?.addEventListener("click", () => {
     activeTab = "proxy";
+    renderConnections();
+  });
+  document.getElementById("logs-tab-fullvpn")?.addEventListener("click", () => {
+    activeTab = "fullvpn";
     renderConnections();
   });
   document.getElementById("logs-tab-direct")?.addEventListener("click", () => {
@@ -6344,6 +6485,7 @@ function initController3() {
     bindEvents();
     void ensureRouteNames();
     void ensureDeviceNames();
+    void ensureFullVpnSourceIps();
     updateControls();
     if (store.get().tabService.current === "logs") {
       startPolling();
@@ -6579,6 +6721,20 @@ var styles5 = `
 
 .pdk_logs-page__route {
     font-weight: 700;
+}
+
+.harpynet-route-fullvpn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.harpynet-route-fullvpn__label {
+    color: var(--success-color-medium, #00a86b);
+    font-size: 13px;
+    font-weight: 800;
 }
 
 .pdk_logs-page__host-cell {

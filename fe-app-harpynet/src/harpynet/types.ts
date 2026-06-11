@@ -72,6 +72,7 @@ export namespace HarpyNet {
     GET_SYSTEM_INFO = 'get_system_info',
     GET_DIRECT_CONNECTIONS = 'get_direct_connections',
     GET_DHCP_CLIENTS = 'get_dhcp_clients',
+    CHECK_HOST_AVAILABILITY = 'check_host_availability',
   }
 
   export enum AvailableClashAPIMethods {
@@ -126,7 +127,7 @@ export namespace HarpyNet {
   }
 
   export interface ConfigProxySubscriptionSection {
-    connection_type: 'proxy';
+    connection_type: 'proxy' | 'full_proxy' | 'full_proxy_bypass_ru';
     proxy_config_type: 'subscription';
     subscription_url: string;
   }
@@ -143,6 +144,7 @@ export namespace HarpyNet {
     '.name': string;
     '.type': 'settings' | 'section';
     yacd_secret_key?: string;
+    fully_routed_ips?: string | string[];
   };
 
   export interface MethodSuccessResponse<T> {

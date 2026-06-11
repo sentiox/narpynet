@@ -15,10 +15,14 @@ get_ruleset_tag() {
 # Creates a new ruleset JSON file if it doesn't already exist
 create_source_rule_set() {
     local ruleset_filepath="$1"
+    local ruleset_dir
 
     if file_exists "$ruleset_filepath"; then
         return 3
     fi
+
+    ruleset_dir="$(dirname "$ruleset_filepath")"
+    mkdir -p "$ruleset_dir" || return 1
 
     jq -n '{version: 3, rules: []}' > "$ruleset_filepath"
 }
@@ -37,6 +41,10 @@ patch_source_ruleset_rules() {
     local filepath="$1"
     local key="$2"
     local value="$3"
+
+    if ! file_exists "$filepath"; then
+        create_source_rule_set "$filepath"
+    fi
 
     local tmpfile=$(mktemp)
 
