@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-harpynet
 
-PKG_VERSION := $(if $(HARPYNET_VERSION),$(HARPYNET_VERSION),0.0.4)
+PKG_VERSION := $(if $(HARPYNET_VERSION),$(HARPYNET_VERSION),0.0.5)
 
 PKG_RELEASE:=1
 

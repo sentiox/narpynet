@@ -3,7 +3,7 @@
 "require uci";
 "require baseclass";
 "require tools.widgets as widgets";
-"require view.harpynet.main-v004 as main";
+"require view.harpynet.main-v022 as main";
 
 function createSettingsContent(section) {
   let o = section.option(

@@ -1,4 +1,4 @@
 "use strict";
-"require view.harpynet.harpynet-v004 as harpynet";
+"require view.harpynet.harpynet-v060 as harpynet";
 
 return harpynet;

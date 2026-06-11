@@ -3,7 +3,7 @@
 "require baseclass";
 "require ui";
 "require uci";
-"require view.harpynet.main-v014 as main";
+"require view.harpynet.main-v022 as main";
 
 let deviceRoutesStylesInjected = false;
 
