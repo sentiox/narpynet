@@ -5788,9 +5788,9 @@ function isLowResponseDirectCandidate(connection) {
     return false;
   }
   if (connection.closedAt) {
-    return download < 512;
+    return download === 0;
   }
-  return download < 512 && age >= 1;
+  return download === 0 && age >= 1;
 }
 function isWebDirectFailureCandidate(connection) {
   const host = getConnectionHost(connection);
@@ -5805,7 +5805,7 @@ function isWebDirectFailureCandidate(connection) {
   const upload = connection.upload || 0;
   const download = connection.download || 0;
   const age = getConnectionAgeSeconds(connection);
-  return upload >= 512 && download < 256 && age >= 3;
+  return upload >= 512 && download === 0 && age >= 3;
 }
 function isGameUdpFailureCandidate(connection) {
   if (!connection.direct || getConnectionType(connection) !== "udp") {

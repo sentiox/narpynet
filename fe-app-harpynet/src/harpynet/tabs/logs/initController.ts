@@ -594,10 +594,10 @@ function isLowResponseDirectCandidate(connection: LoggedConnection) {
   }
 
   if (connection.closedAt) {
-    return download < 512;
+    return download === 0;
   }
 
-  return download < 512 && age >= 1;
+  return download === 0 && age >= 1;
 }
 
 function isWebDirectFailureCandidate(connection: LoggedConnection) {
@@ -618,7 +618,7 @@ function isWebDirectFailureCandidate(connection: LoggedConnection) {
   const download = connection.download || 0;
   const age = getConnectionAgeSeconds(connection);
 
-  return upload >= 512 && download < 256 && age >= 3;
+  return upload >= 512 && download === 0 && age >= 3;
 }
 
 function isGameUdpFailureCandidate(connection: LoggedConnection) {
