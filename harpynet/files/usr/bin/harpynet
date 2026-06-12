@@ -154,6 +154,7 @@ start_main() {
     create_nft_rules
     config_foreach add_cron_job "section"
     add_subscription_cron_job
+    add_dns_log_cron_job
     /etc/init.d/sing-box start
 
     log "Nice"
@@ -436,6 +437,7 @@ dnsmasq_configure() {
     uci_commit "dhcp"
 
     : > "$DNS_LOG_FILE"
+    chmod 600 "$DNS_LOG_FILE"
     /etc/init.d/dnsmasq restart
 }
 
@@ -555,7 +557,8 @@ add_cron_job() {
 remove_cron_job() {
     (crontab -l |
         grep -v "/usr/bin/harpynet list_update" |
-        grep -v "/usr/bin/harpynet subscription_update") | crontab -
+        grep -v "/usr/bin/harpynet subscription_update" |
+        grep -v "/usr/bin/harpynet dns_log_rotate") | crontab -
     log "The cron job removed"
 }
 
@@ -586,6 +589,40 @@ add_subscription_cron_job() {
     log "The subscription cron job has been created: $subscription_cron_job"
 }
 
+add_dns_log_cron_job() {
+    local dns_log_cron_job="41 * * * * /usr/bin/harpynet dns_log_rotate"
+
+    (crontab -l | grep -v "/usr/bin/harpynet dns_log_rotate"; echo "$dns_log_cron_job") | crontab -
+    log "The DNS log rotation cron job has been created: $dns_log_cron_job"
+}
+
+dns_log_rotate() {
+    local max_size="${1:-8388608}"
+    local keep_lines="${2:-20000}"
+    local current_size tail_file
+
+    [ -f "$DNS_LOG_FILE" ] || return 0
+    chmod 600 "$DNS_LOG_FILE"
+
+    current_size="$(wc -c < "$DNS_LOG_FILE" 2>/dev/null)"
+    case "$current_size" in
+    '' | *[!0-9]*) return 1 ;;
+    esac
+
+    [ "$current_size" -le "$max_size" ] && return 0
+
+    tail_file="$(mktemp)"
+    if ! tail -n "$keep_lines" "$DNS_LOG_FILE" > "$tail_file"; then
+        rm -f "$tail_file"
+        return 1
+    fi
+
+    cat "$tail_file" > "$DNS_LOG_FILE"
+    rm -f "$tail_file"
+    chmod 600 "$DNS_LOG_FILE"
+    log "DNS query log rotated from $current_size bytes"
+}
+
 subscription_update() {
     local lock_dir="/var/run/harpynet-subscription-update.lock"
 
@@ -597,12 +634,54 @@ subscription_update() {
     trap "rmdir '$lock_dir' 2>/dev/null" EXIT INT TERM
     log "Starting scheduled subscription update"
 
+    check_requirements
+    migration
+    config_foreach process_validate_service "section"
+
+    SUBSCRIPTION_LINKS_CHANGED=0
+    if ! config_foreach check_subscription_links_changed_handler "section"; then
+        log "Subscription check failed; keeping the current sing-box process" "error"
+        echo '{"success":false,"changed":false,"error":"subscription_check_failed"}'
+        return 1
+    fi
+
+    if [ "$SUBSCRIPTION_LINKS_CHANGED" -eq 0 ]; then
+        log "Subscription links are unchanged; keeping the current sing-box process"
+        echo '{"success":true,"changed":false}'
+        return 0
+    fi
+
+    log "Subscription links changed; restarting HarpyNet"
     if /etc/init.d/harpynet restart >/dev/null 2>&1; then
         log "Subscription update completed successfully"
-        echo '{"success":true}'
+        echo '{"success":true,"changed":true}'
     else
         log "Subscription update failed; the previous working configuration was restored" "error"
         return 1
+    fi
+}
+
+check_subscription_links_changed_handler() {
+    local section="$1"
+    local connection_type subscription_url new_links cache_file old_links
+
+    config_get connection_type "$section" "connection_type"
+    case "$connection_type" in
+    proxy | full_proxy | full_proxy_bypass_ru) ;;
+    *) return 0 ;;
+    esac
+
+    config_get subscription_url "$section" "subscription_url"
+    new_links="$(download_subscription_proxy_links "$subscription_url" "$section")" || return 1
+    cache_file="/var/run/harpynet/subscription-$section.links"
+    old_links=""
+    [ -f "$cache_file" ] && old_links="$(awk -F '\t' 'NF >= 2 { print $2 }' "$cache_file")"
+
+    if [ "$new_links" != "$old_links" ]; then
+        SUBSCRIPTION_LINKS_CHANGED=1
+        log "Subscription links changed for '$section'"
+    else
+        log "Subscription links are unchanged for '$section'"
     fi
 }
 
@@ -637,7 +716,7 @@ list_update() {
         local service_proxy_address
         service_proxy_address="$(get_service_proxy_address)"
 
-        if [ -n "$http_proxy_address" ]; then
+        if [ -n "$service_proxy_address" ]; then
             if curl -s -x "http://$service_proxy_address" -m $curl_timeout https://github.com > /dev/null; then
                 echolog "✅ GitHub connection check passed (via proxy)"
                 break
@@ -663,15 +742,203 @@ list_update() {
 
     echolog "📥 Downloading and processing lists..."
 
-    config_foreach import_community_subnet_lists "section"
-    config_foreach import_domains_from_remote_domain_lists "section"
-    config_foreach import_subnets_from_remote_subnet_lists "section"
+    local update_failed=0
+    config_foreach import_community_subnet_lists "section" || update_failed=1
+    config_foreach import_domains_from_remote_domain_lists "section" || update_failed=1
+    config_foreach import_subnets_from_remote_subnet_lists "section" || update_failed=1
 
-    if [ $? -eq 0 ]; then
+    if [ "$update_failed" -eq 0 ]; then
         echolog "✅ Lists update completed successfully"
     else
         echolog "❌ Lists update failed"
+        return 1
     fi
+}
+
+list_report_url_for_service() {
+    case "$1" in
+    twitter) echo "$SUBNETS_TWITTER" ;;
+    meta) echo "$SUBNETS_META" ;;
+    telegram) echo "$SUBNETS_TELERAM" ;;
+    cloudflare) echo "$SUBNETS_CLOUDFLARE" ;;
+    hetzner) echo "$SUBNETS_HETZNER" ;;
+    ovh) echo "$SUBNETS_OVH" ;;
+    digitalocean) echo "$SUBNETS_DIGITALOCEAN" ;;
+    cloudfront) echo "$SUBNETS_CLOUDFRONT" ;;
+    discord) echo "$SUBNETS_DISCORD" ;;
+    roblox) echo "$SUBNETS_ROBLOX" ;;
+    *) return 1 ;;
+    esac
+}
+
+list_report_check_url() {
+    local label="$1"
+    local kind="$2"
+    local url="$3"
+    local cache_dir="$4"
+    local downloaded normalized cached added removed key proxy
+
+    [ -n "$url" ] || return 0
+    downloaded="$(mktemp)"
+    normalized="$(mktemp)"
+    added="$(mktemp)"
+    removed="$(mktemp)"
+    key="$(printf '%s' "$url" | md5sum | awk '{print $1}')"
+    cached="$cache_dir/$key.list"
+    proxy="$(get_service_proxy_address)"
+
+    if ! download_to_file "$url" "$downloaded" "$proxy" >/dev/null 2>&1 || [ ! -s "$downloaded" ]; then
+        jq -n --arg label "$label" --arg kind "$kind" --arg url "$url" \
+            '{label:$label,kind:$kind,url:$url,status:"download_failed",added:[],removed:[]}' >> "$LIST_REPORT_ITEMS"
+        rm -f "$downloaded" "$normalized" "$added" "$removed"
+        return 1
+    fi
+
+    convert_crlf_to_lf "$downloaded"
+    grep -vE '^[[:space:]]*(#|//|$)' "$downloaded" |
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+        sort -u > "$normalized"
+
+    if [ -f "$cached" ]; then
+        grep -Fvx -f "$cached" "$normalized" | head -n 100 > "$added"
+        grep -Fvx -f "$normalized" "$cached" | head -n 100 > "$removed"
+    else
+        : > "$added"
+        : > "$removed"
+    fi
+
+    jq -n \
+        --arg label "$label" \
+        --arg kind "$kind" \
+        --arg url "$url" \
+        --argjson first_seen "$([ -f "$cached" ] && echo false || echo true)" \
+        --rawfile added "$added" \
+        --rawfile removed "$removed" \
+        '{
+            label:$label,
+            kind:$kind,
+            url:$url,
+            status:"ok",
+            first_seen:$first_seen,
+            added:($added | split("\n") | map(select(length > 0))),
+            removed:($removed | split("\n") | map(select(length > 0)))
+        }' >> "$LIST_REPORT_ITEMS"
+
+    mv "$normalized" "$cached"
+    rm -f "$downloaded" "$added" "$removed"
+}
+
+list_report_community_handler() {
+    local service="$1"
+    local cache_dir="$2"
+    local url
+
+    url="$(list_report_url_for_service "$service")" || return 0
+    list_report_check_url "$service" "IPv4" "$url" "$cache_dir"
+}
+
+list_report_remote_domain_handler() {
+    list_report_check_url "remote domains" "domains" "$1" "$2"
+}
+
+list_report_remote_subnet_handler() {
+    list_report_check_url "remote subnets" "IPv4" "$1" "$2"
+}
+
+list_report_section_handler() {
+    local section="$1"
+    local cache_dir="$2"
+
+    config_list_foreach "$section" "community_lists" list_report_community_handler "$cache_dir"
+    config_list_foreach "$section" "remote_domain_lists" list_report_remote_domain_handler "$cache_dir"
+    config_list_foreach "$section" "remote_subnet_lists" list_report_remote_subnet_handler "$cache_dir"
+}
+
+list_update_report_run() {
+    local cache_dir="/etc/harpynet/list-update-cache"
+    local output status changed_count
+
+    mkdir -p "$cache_dir"
+    LIST_REPORT_ITEMS="$(mktemp)"
+    output="$(mktemp)"
+    : > "$LIST_REPORT_ITEMS"
+
+    config_foreach list_report_section_handler "section" "$cache_dir"
+    if list_update > "$output" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+
+    changed_count="$(jq -s '[.[] | select((.added | length) > 0 or (.removed | length) > 0)] | length' "$LIST_REPORT_ITEMS")"
+    if [ "$status" -eq 0 ] && [ "$changed_count" -gt 0 ]; then
+        log "List contents changed; restarting sing-box to apply them"
+        /etc/init.d/sing-box restart
+    else
+        log "List contents are unchanged; keeping the current sing-box process"
+    fi
+
+    jq -s \
+        --argjson success "$([ "$status" -eq 0 ] && echo true || echo false)" \
+        --argjson changed "$([ "$changed_count" -gt 0 ] && echo true || echo false)" \
+        --rawfile log "$output" \
+        '{
+            success:$success,
+            running:false,
+            changed:$changed,
+            first_seen:[.[] | select(.first_seen == true)] | length,
+            failed:[.[] | select(.status != "ok")] | length,
+            lists:.,
+            log:$log
+        }' "$LIST_REPORT_ITEMS"
+
+    rm -f "$LIST_REPORT_ITEMS" "$output"
+    return "$status"
+}
+
+list_update_report_start() {
+    local state="/tmp/harpynet-list-update-report.json"
+    local pidfile="/var/run/harpynet-list-update-report.pid"
+    local pid
+
+    if [ -f "$pidfile" ]; then
+        pid="$(cat "$pidfile" 2>/dev/null)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo '{"success":true,"running":true}'
+            return 0
+        fi
+    fi
+
+    echo '{"success":true,"running":true}' > "$state"
+    (
+        /usr/bin/harpynet list_update_report_run > "$state.tmp" 2>&1
+        if jq -e . "$state.tmp" >/dev/null 2>&1; then
+            mv "$state.tmp" "$state"
+        else
+            jq -n --rawfile error "$state.tmp" \
+                '{success:false,running:false,error:$error,lists:[]}' > "$state"
+            rm -f "$state.tmp"
+        fi
+        rm -f "$pidfile"
+    ) >/dev/null 2>&1 </dev/null &
+    echo $! > "$pidfile"
+    echo '{"success":true,"running":true}'
+}
+
+list_update_report_status() {
+    local state="/tmp/harpynet-list-update-report.json"
+    local pidfile="/var/run/harpynet-list-update-report.pid"
+    local pid
+
+    if [ -f "$pidfile" ]; then
+        pid="$(cat "$pidfile" 2>/dev/null)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo '{"success":true,"running":true}'
+            return 0
+        fi
+    fi
+
+    [ -s "$state" ] && cat "$state" || echo '{"success":false,"running":false,"error":"Нет результата обновления","lists":[]}'
 }
 
 # sing-box funcs
@@ -1663,8 +1930,12 @@ import_community_service_subnet_list_handler() {
     "discord")
         URL=$SUBNETS_DISCORD
         nft_create_ipv4_set "$NFT_TABLE_NAME" "$NFT_DISCORD_SET_NAME"
-        nft add rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" ip daddr \
-            "@$NFT_DISCORD_SET_NAME" udp dport '{ 3478-3481, 19000-20000, 50000-65535 }' meta mark set "$NFT_FAKEIP_MARK" counter
+        if ! nft list chain inet "$NFT_TABLE_NAME" mangle 2>/dev/null |
+            grep -q "@$NFT_DISCORD_SET_NAME udp dport"; then
+            nft add rule inet "$NFT_TABLE_NAME" mangle iifname "@$NFT_INTERFACE_SET_NAME" ip daddr \
+                "@$NFT_DISCORD_SET_NAME" udp dport '{ 3478-3481, 19000-20000, 50000-65535 }' \
+                meta mark set "$NFT_FAKEIP_MARK" counter
+        fi
         ;;
     "roblox")
         URL=$SUBNETS_ROBLOX
@@ -1680,6 +1951,7 @@ import_community_service_subnet_list_handler() {
 
     if [ $? -ne 0 ] || [ ! -s "$tmpfile" ]; then
         log "Download $service list failed" "error"
+        rm -f "$tmpfile"
         return 1
     fi
 
@@ -3661,7 +3933,10 @@ Available commands:
     restart                 Restart harpynet service
     main                    Run main harpynet process
     list_update             Update domain lists
+    list_update_report_start Start list update report in background
+    list_update_report_status Get list update report status
     subscription_update     Update subscription and reload HarpyNet
+    dns_log_rotate          Limit the DNS query log size
     check_proxy             Check proxy connectivity
     check_nft               Check NFT rules
     check_nft_rules         Check NFT rules status
@@ -3708,8 +3983,20 @@ main)
 list_update)
     list_update
     ;;
+list_update_report_run)
+    list_update_report_run
+    ;;
+list_update_report_start)
+    list_update_report_start
+    ;;
+list_update_report_status)
+    list_update_report_status
+    ;;
 subscription_update)
     subscription_update
+    ;;
+dns_log_rotate)
+    dns_log_rotate "${2:-}" "${3:-}"
     ;;
 check_proxy)
     check_proxy

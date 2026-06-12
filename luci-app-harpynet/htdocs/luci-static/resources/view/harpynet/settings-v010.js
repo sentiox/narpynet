@@ -1,9 +1,118 @@
 "use strict";
 "require form";
 "require uci";
+"require fs";
+"require ui";
 "require baseclass";
 "require tools.widgets as widgets";
 "require view.harpynet.main-v022 as main";
+
+function parseCommandJson(response) {
+  if (!response || !response.stdout) {
+    throw new Error(response?.stderr || "Команда не вернула результат");
+  }
+  return JSON.parse(response.stdout);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function runListUpdate() {
+  ui.showModal("Обновление списков", [
+    E("p", {}, "Скачиваю свежие домены/IP и сравниваю с прошлой проверкой..."),
+    E("p", { class: "spinning" }, "Это может занять до нескольких минут."),
+  ]);
+
+  try {
+    parseCommandJson(await fs.exec("/usr/bin/harpynet", ["list_update_report_start"]));
+
+    let report;
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await sleep(2000);
+      report = parseCommandJson(
+        await fs.exec("/usr/bin/harpynet", ["list_update_report_status"]),
+      );
+      if (!report.running) break;
+    }
+
+    if (!report || report.running) {
+      throw new Error("Обновление не завершилось за 4 минуты");
+    }
+
+    const changed = (report.lists || []).filter(
+      (item) => (item.added || []).length || (item.removed || []).length,
+    );
+    const body = [
+      E(
+        "p",
+        { class: report.success ? "alert-message success" : "alert-message warning" },
+        changed.length
+          ? "Списки обновлены. Ниже показаны изменения."
+          : report.first_seen
+            ? "Первый снимок списков сохранён. Изменения появятся при следующей проверке."
+            : "Списки проверены: изменений нет. Sing-box не перезапускался.",
+      ),
+    ];
+
+    changed.forEach((item) => {
+      const rows = [];
+      if ((item.added || []).length) {
+        rows.push(
+          E("p", {}, [
+            E("strong", {}, "Добавлено: "),
+            E("code", { style: "white-space:pre-wrap" }, item.added.join("\n")),
+          ]),
+        );
+      }
+      if ((item.removed || []).length) {
+        rows.push(
+          E("p", {}, [
+            E("strong", {}, "Удалено: "),
+            E("code", { style: "white-space:pre-wrap" }, item.removed.join("\n")),
+          ]),
+        );
+      }
+      body.push(
+        E("div", { class: "cbi-section" }, [
+          E("h4", {}, `${item.label} (${item.kind})`),
+          ...rows,
+        ]),
+      );
+    });
+
+    if (report.failed) {
+      body.push(
+        E("p", { class: "alert-message warning" }, `Не скачалось списков: ${report.failed}`),
+      );
+    }
+    if (report.log) {
+      body.push(
+        E("details", {}, [
+          E("summary", {}, "Технический лог"),
+          E(
+            "pre",
+            { style: "white-space:pre-wrap;max-height:240px;overflow:auto" },
+            report.log,
+          ),
+        ]),
+      );
+    }
+    body.push(
+      E("div", { class: "right" }, [
+        E("button", { class: "btn", click: () => ui.hideModal() }, "Закрыть"),
+      ]),
+    );
+    ui.showModal("Обновление списков", body);
+  } catch (error) {
+    ui.showModal("Ошибка обновления списков", [
+      E("p", { class: "alert-message warning" }, error?.message || String(error)),
+      E("div", { class: "right" }, [
+        E("button", { class: "btn", click: () => ui.hideModal() }, "Закрыть"),
+      ]),
+    ]);
+  }
+}
 
 function createSettingsContent(section) {
   let o = section.option(
@@ -283,6 +392,16 @@ function createSettingsContent(section) {
   o.value("3d", "Каждые 3 дня");
   o.default = "1d";
   o.rmempty = false;
+
+  o = section.option(
+    form.Button,
+    "_manual_list_update",
+    "Обновить списки сейчас",
+    "Скачать свежие домены/IP и показать, что изменилось.",
+  );
+  o.inputtitle = "Обновить списки";
+  o.inputstyle = "apply";
+  o.onclick = runListUpdate;
 
   o = section.option(
     form.ListValue,
